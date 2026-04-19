@@ -15,3 +15,4 @@ from knuckles.api.v1 import apple_oauth as _apple_oauth  # noqa: E402, F401
 from knuckles.api.v1 import auth as _auth  # noqa: E402, F401 — side-effect import
 from knuckles.api.v1 import google_oauth as _google_oauth  # noqa: E402, F401
 from knuckles.api.v1 import magic_link as _magic_link  # noqa: E402, F401
+from knuckles.api.v1 import passkey as _passkey  # noqa: E402, F401
