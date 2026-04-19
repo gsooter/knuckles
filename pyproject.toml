@@ -109,6 +109,7 @@ omit = [
     "*/scripts/*",
     "*/migrations/*",
     "*/app.py",
+    "*/wsgi.py",
 ]
 
 [tool.coverage.report]

@@ -427,3 +427,44 @@ between the state's ``app_client_id`` and the caller's
   embedded ``redirect_uri`` + ``app_client_id``).
 - State TTL is 10 minutes — long enough for a slow user, short enough
   to bound replay risk if the signing secret is later rotated.
+
+---
+
+### 011 — Single-Service Boot: Migrate Then Gunicorn
+
+**Date:** 2026-04-19
+**Status:** Decided
+
+**Decision:** ``scripts/start.sh`` runs ``alembic upgrade head`` then
+``exec`` s gunicorn. Knuckles ships as a single Railway service whose
+container CMD is that script — no separate release-phase container,
+no out-of-band migration runner.
+
+**Rationale:**
+- The Knuckles schema is small (six tables) and migrations are
+  expected to be quick. The cost of a brief startup migration is
+  measured in seconds.
+- Coupling migration to boot makes deploys atomic per-service. If the
+  migration fails, the container exits non-zero and Railway's restart
+  policy backs off — exactly the failure mode we want, and visible in
+  Railway's deploy logs.
+- A separate release-phase container would require a second Railway
+  service, env-var duplication, and ordering logic in the deploy
+  pipeline — operational weight Knuckles doesn't have headcount for.
+
+**Alternatives considered:**
+- **Release-phase migration container** (à la Heroku): rejected for
+  the operational weight reason above.
+- **Manual migrations via Railway CLI**: rejected — easy to forget,
+  can't be enforced in CI, hostile to CI/CD.
+- **In-process migrations triggered from ``create_app``**: rejected.
+  Multi-worker gunicorn would race on the migration table; running
+  in the entrypoint guarantees a single execution per deploy.
+
+**Consequences:**
+- Knuckles boot time on a deploy that includes a migration is
+  dominated by the migration; non-migrating deploys boot in under
+  a second.
+- Long-running migrations in the future will need a separate
+  release-phase container or pre-deploy migration script. Revisit
+  this decision when a single migration crosses ~10 seconds.

@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Knuckles + dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Black (format check)
+        run: black --check knuckles tests
+
+      - name: Ruff (lint)
+        run: ruff check knuckles tests
+
+      - name: Mypy (strict)
+        run: mypy knuckles
+
+      - name: Pytest (with 80% coverage gate)
+        run: pytest --cov=knuckles --cov-report=term-missing --cov-fail-under=80

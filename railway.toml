@@ -1,0 +1,15 @@
+# Railway deployment config for Knuckles.
+#
+# Railway picks this up automatically. The Dockerfile builder runs
+# `docker build .`, the start command is baked into the Dockerfile's
+# CMD (scripts/start.sh runs migrations then exec gunicorn).
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
