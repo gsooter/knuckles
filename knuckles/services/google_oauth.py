@@ -28,9 +28,9 @@ from sqlalchemy.orm import Session
 from knuckles.core.config import get_settings
 from knuckles.core.exceptions import GOOGLE_AUTH_FAILED, AppError
 from knuckles.core.state_jwt import issue_state, verify_state
-from knuckles.data.models import OAuthProvider, User
-from knuckles.data.repositories import auth as repo
+from knuckles.data.models import OAuthProvider
 from knuckles.services import tokens
+from knuckles.services._oauth_upsert import upsert_oauth_user
 
 _AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -167,8 +167,9 @@ def complete(
     if isinstance(expires_in, int):
         expires_at = datetime.now(tz=UTC) + timedelta(seconds=expires_in)
 
-    user = _upsert_oauth_user(
+    user = upsert_oauth_user(
         session,
+        provider=OAuthProvider.GOOGLE,
         provider_user_id=sub,
         email=email_raw.lower(),
         display_name=profile.get("name"),
@@ -176,7 +177,9 @@ def complete(
         access_token=access_token,
         refresh_token=google_tokens.get("refresh_token"),
         token_expires_at=expires_at,
+        scopes=_SCOPES,
         raw_profile=profile,
+        fail_code=GOOGLE_AUTH_FAILED,
     )
 
     return tokens.issue_session(
@@ -225,89 +228,6 @@ def _verify_state(state: str, *, app_client_id: str) -> dict[str, Any]:
             status_code=400,
         )
     return claims
-
-
-def _upsert_oauth_user(
-    session: Session,
-    *,
-    provider_user_id: str,
-    email: str,
-    display_name: str | None,
-    avatar_url: str | None,
-    access_token: str,
-    refresh_token: str | None,
-    token_expires_at: datetime | None,
-    raw_profile: dict[str, Any],
-) -> User:
-    """Find-or-create the user bound to a Google identity, refreshing tokens.
-
-    Resolution order: existing OAuth link → existing user with the same
-    email → new user.
-
-    Args:
-        session: Active SQLAlchemy session.
-        provider_user_id: Google ``sub`` claim.
-        email: Lowercased email returned by Google.
-        display_name: Best-effort display name from the profile.
-        avatar_url: Best-effort avatar URL from the profile.
-        access_token: Current Google access token.
-        refresh_token: Optional Google refresh token (offline-access).
-        token_expires_at: Optional expiry of the Google access token.
-        raw_profile: Verbatim Google userinfo payload, kept for audit.
-
-    Returns:
-        The :class:`User` now linked to this Google identity.
-
-    Raises:
-        AppError: With code ``GOOGLE_AUTH_FAILED`` if the bound user
-            row is deactivated.
-    """
-    existing = repo.get_oauth_provider(session, OAuthProvider.GOOGLE, provider_user_id)
-    if existing is not None:
-        if not existing.user.is_active:
-            raise AppError(
-                code=GOOGLE_AUTH_FAILED,
-                message="This account is no longer active.",
-                status_code=400,
-            )
-        repo.update_oauth_tokens(
-            session,
-            existing,
-            access_token=access_token,
-            refresh_token=refresh_token,
-            token_expires_at=token_expires_at,
-        )
-        repo.update_last_seen(session, existing.user)
-        return existing.user
-
-    user = repo.get_user_by_email(session, email)
-    if user is None:
-        user = repo.create_user(
-            session,
-            email=email,
-            display_name=display_name,
-            avatar_url=avatar_url,
-        )
-    elif not user.is_active:
-        raise AppError(
-            code=GOOGLE_AUTH_FAILED,
-            message="This account is no longer active.",
-            status_code=400,
-        )
-
-    repo.create_oauth_provider(
-        session,
-        user_id=user.id,
-        provider=OAuthProvider.GOOGLE,
-        provider_user_id=provider_user_id,
-        access_token=access_token,
-        refresh_token=refresh_token,
-        token_expires_at=token_expires_at,
-        scopes=_SCOPES,
-        raw_profile=raw_profile,
-    )
-    repo.update_last_seen(session, user)
-    return user
 
 
 def _post_token(code: str, redirect_uri: str) -> dict[str, Any]:
