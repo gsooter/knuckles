@@ -52,6 +52,8 @@ _TEST_ENV = {
     "MAGIC_LINK_TTL_SECONDS": "900",
     "SENDGRID_API_KEY": "test-sendgrid",
     "SENDGRID_FROM_EMAIL": "test@knuckles.test",
+    "GOOGLE_OAUTH_CLIENT_ID": "test-google-client-id",
+    "GOOGLE_OAUTH_CLIENT_SECRET": "test-google-client-secret",
     "WEBAUTHN_RP_ID": "localhost",
     "WEBAUTHN_RP_NAME": "Knuckles Test",
     "WEBAUTHN_ORIGIN": "http://localhost:3000",

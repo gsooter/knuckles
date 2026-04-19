@@ -384,3 +384,46 @@ constructs the SendGrid client. Both pass the same type check.
   no config switch, no plugin registry.
 - The service layer never imports SendGrid — only :func:`get_default_sender`
   does, which keeps the dependency graph shallow for tests.
+
+---
+
+### 010 — OAuth State Carries Redirect URI and App-Client Binding
+
+**Date:** 2026-04-19
+**Status:** Decided
+
+**Decision:** The state JWT minted by Knuckles for an OAuth ceremony
+embeds two fields beyond the boilerplate ``purpose``/``iat``/``exp``:
+the consuming app's ``redirect_uri`` and the calling
+``app_client_id``. :func:`google_oauth.complete` (and Apple's coming
+sibling) re-derives both from the state and rejects any mismatch
+between the state's ``app_client_id`` and the caller's
+``X-Client-Id``.
+
+**Rationale:**
+- The OAuth provider requires the same ``redirect_uri`` on the token
+  exchange as on the authorize step. Storing it server-side requires
+  Redis or DB; embedding it in the signed state JWT keeps Knuckles
+  stateless without weakening security (HMAC + 10-minute TTL).
+- Embedding ``app_client_id`` prevents an attacker who steals an
+  in-flight state token from completing the ceremony against a
+  different app's session-issuance.
+
+**Alternatives considered:**
+- **Server-side state in Redis** — rejected. Adds an operational
+  dependency for a single-roundtrip value that a JWT solves cleanly.
+- **Trust the caller's claimed redirect_uri at complete time** —
+  rejected. Allows a malicious caller to pivot a leaked code by
+  mismatching the redirect_uri.
+- **Single global ``redirect_uri`` baked into config** — rejected.
+  Each consuming app needs its own callback path; per-app
+  pre-registration in Google Cloud Console is operationally cleaner
+  than forcing every app to share Knuckles' frontend.
+
+**Consequences:**
+- Each consuming app must pre-register its callback URL with the
+  Knuckles Google OAuth client in the Google Cloud Console.
+- Apple's flow will use the same shape (purpose discriminator +
+  embedded ``redirect_uri`` + ``app_client_id``).
+- State TTL is 10 minutes — long enough for a slow user, short enough
+  to bound replay risk if the signing secret is later rotated.
