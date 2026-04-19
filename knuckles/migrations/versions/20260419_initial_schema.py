@@ -50,7 +50,6 @@ def upgrade() -> None:
         "apple",
         name="knuckles_oauth_provider",
     )
-    provider_enum.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "user_oauth_providers",
