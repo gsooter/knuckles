@@ -28,9 +28,7 @@ def test_verify_rejects_wrong_purpose() -> None:
 
 def test_verify_rejects_expired_state(monkeypatch: pytest.MonkeyPatch) -> None:
     real_time = time.time
-    monkeypatch.setattr(
-        "knuckles.core.state_jwt.time.time", lambda: real_time() - 600
-    )
+    monkeypatch.setattr("knuckles.core.state_jwt.time.time", lambda: real_time() - 600)
     token = issue_state(
         purpose="passkey_register", payload={"challenge": "xyz"}, ttl_seconds=300
     )

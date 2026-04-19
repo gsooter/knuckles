@@ -50,14 +50,10 @@ def require_auth(view: Callable[_P, _T]) -> Callable[_P, _T]:
         """
         header = request.headers.get("Authorization", "")
         if not header.lower().startswith("bearer "):
-            raise UnauthorizedError(
-                message="Missing bearer token.", code=INVALID_TOKEN
-            )
+            raise UnauthorizedError(message="Missing bearer token.", code=INVALID_TOKEN)
         token = header.split(" ", 1)[1].strip()
         if not token:
-            raise UnauthorizedError(
-                message="Missing bearer token.", code=INVALID_TOKEN
-            )
+            raise UnauthorizedError(message="Missing bearer token.", code=INVALID_TOKEN)
 
         claims = verify_access_token(token)
         try:
@@ -71,7 +67,7 @@ def require_auth(view: Callable[_P, _T]) -> Callable[_P, _T]:
         g.token_claims = claims
         return view(*args, **kwargs)
 
-    return cast(Callable[_P, _T], wrapper)
+    return cast("Callable[_P, _T]", wrapper)
 
 
 def get_current_user_id() -> uuid.UUID:
@@ -88,7 +84,7 @@ def get_current_user_id() -> uuid.UUID:
         raise RuntimeError(
             "get_current_user_id called outside a require_auth-decorated view."
         )
-    return cast(uuid.UUID, user_id)
+    return cast("uuid.UUID", user_id)
 
 
 def get_token_claims() -> dict[str, object]:
@@ -105,4 +101,4 @@ def get_token_claims() -> dict[str, object]:
         raise RuntimeError(
             "get_token_claims called outside a require_auth-decorated view."
         )
-    return cast(dict[str, object], claims)
+    return cast("dict[str, object]", claims)

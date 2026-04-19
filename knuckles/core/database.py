@@ -5,11 +5,11 @@ pattern is proven and keeps the Knuckles service familiar to anyone
 moving between the two codebases.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from flask import Flask, g
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import DateTime, Engine, create_engine
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -19,6 +19,15 @@ from sqlalchemy.orm import (
 )
 
 from knuckles.core.config import get_settings
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime.
+
+    Returns:
+        Current UTC time with ``tzinfo=UTC``.
+    """
+    return datetime.now(tz=UTC)
 
 
 class Base(DeclarativeBase):
@@ -35,10 +44,13 @@ class TimestampMixin:
         updated_at: Timestamp when the row was last modified.
     """
 
-    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
     )
 
 

@@ -65,6 +65,13 @@ known-first-party = ["knuckles"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["TCH001", "TCH002", "TCH003"]
+# SQLAlchemy 2.0 Mapped annotations require runtime access to the
+# referenced types, so TCH rules that move imports into TYPE_CHECKING
+# blocks would break mapper configuration. UP047 suggests PEP 695 type
+# parameters but the ParamSpec pattern used in require_auth is fine.
+"knuckles/data/models/*.py" = ["TCH001", "TCH002", "TCH003"]
+"knuckles/data/repositories/*.py" = ["TCH001", "TCH002", "TCH003"]
+"knuckles/core/auth.py" = ["TCH001", "TCH002", "TCH003", "UP047"]
 
 [tool.mypy]
 python_version = "3.12"

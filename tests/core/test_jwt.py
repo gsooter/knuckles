@@ -69,9 +69,7 @@ def test_issue_access_token_without_optional_fields() -> None:
 def test_verify_rejects_expired_token(monkeypatch: pytest.MonkeyPatch) -> None:
     # Move clock back by TTL + 60s so the freshly issued token is expired.
     real_time = time.time
-    monkeypatch.setattr(
-        "knuckles.core.jwt.time.time", lambda: real_time() - 3660
-    )
+    monkeypatch.setattr("knuckles.core.jwt.time.time", lambda: real_time() - 3660)
     token = issue_access_token(user_id=uuid.uuid4(), app_client_id="greenroom")
     monkeypatch.setattr("knuckles.core.jwt.time.time", real_time)
 
