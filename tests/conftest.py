@@ -4,8 +4,11 @@ The test env stubs a base64-encoded RS256 private key generated once
 per test session, so every test that issues or verifies a JWT uses
 a real signing key without needing OpenSSL on the dev box.
 
-DB-backed integration tests point at a local ``knuckles_test`` Postgres
-database. Pure logic tests do not need a live DB.
+Repository-layer and service-layer tests reuse the ``db_session``
+fixture defined here against an in-memory SQLite database so tests
+stay hermetic and fast. Knuckles' models use cross-dialect types
+(``sa.Uuid``, ``sa.JSON``) so the same schema works against Postgres
+in production without a second definition.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from collections.abc import Iterator
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy.orm import Session
 
 
 def _generate_test_private_key_b64() -> str:
@@ -72,3 +76,31 @@ def _reset_signing_key_cache() -> Iterator[None]:
     reset_key_cache()
     yield
     reset_key_cache()
+
+
+@pytest.fixture()
+def db_session() -> Iterator[Session]:
+    """Yield a fresh SQLite-backed SQLAlchemy session per test.
+
+    The schema is created from the ORM metadata at the start of every
+    test and the engine is disposed at teardown, giving each test a
+    pristine database.
+
+    Yields:
+        An active ``Session`` bound to an in-memory SQLite engine.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from knuckles.core.database import Base
+    from knuckles.data import models  # noqa: F401 — register on metadata
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session = factory()
+    try:
+        yield session
+    finally:
+        session.close()
+        engine.dispose()

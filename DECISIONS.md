@@ -265,3 +265,83 @@ secret.
   than 24 hours old so the table stays small.
 
 ---
+
+### 007 — App-Client Authentication via X-Client-Id + X-Client-Secret
+
+**Date:** 2026-04-19
+**Status:** Decided
+
+**Decision:** Every Knuckles endpoint that mutates session state
+(`/v1/token/refresh`, `/v1/logout`, and future ceremony-completion
+endpoints) requires the calling app to prove its identity with
+`X-Client-Id` and `X-Client-Secret` headers. The secret is stored as
+a SHA-256 hex digest and checked with `hmac.compare_digest` to defeat
+timing attacks. The resolved `AppClient` row is attached to `flask.g`
+so downstream code can read it without another query.
+
+**Rationale:**
+The refresh-token rotation endpoint is the single most attractive
+target in the service — a leaked refresh token combined with an
+unauthenticated rotation endpoint would let any holder mint arbitrary
+access tokens. Requiring the caller to also present its client secret
+reduces the blast radius to "attacker who has *both* the refresh token
+*and* the shared client secret" — a far harder bar to clear than
+stealing a token from browser storage alone.
+
+The client-secret model also gives us per-consumer audit trails and
+the ability to rotate a compromised app's credentials without
+invalidating every user session.
+
+**Alternatives considered:**
+- **Public client with refresh-token-only auth** — rejected. That
+  works for confidential OAuth clients operating entirely in the
+  browser, but browser-side secrets are effectively public. A
+  server-side client with a secret is the right fit for consuming
+  apps that run a backend (Greenroom does).
+- **mTLS between services** — rejected for now. Operational overhead
+  is high relative to the benefit at our current scale; header-based
+  auth is sufficient and upgrade-compatible.
+
+**Consequences:**
+- Every consuming app ships its client secret in an env var, not
+  the frontend bundle.
+- `AppClient.client_secret_hash` is mandatory; there is no "public
+  client" escape hatch.
+- Rotating a compromised secret is a database update plus redeploy
+  — no mass session invalidation required.
+
+---
+
+### 008 — Refresh-Token Reuse Detection Revokes All User Tokens
+
+**Date:** 2026-04-19
+**Status:** Decided
+
+**Decision:** When a refresh token that has already been consumed
+(`used_at IS NOT NULL`) is presented again, Knuckles marks every
+still-active refresh token for the same user as used before returning
+`REFRESH_TOKEN_REUSED`. The legitimate client's still-outstanding
+token is invalidated along with the attacker's copy.
+
+**Rationale:**
+If two parties present the same consumed token, one of them is an
+attacker — and we cannot tell which. The industry-standard response
+(OAuth 2.0 Security BCP §4.14.2) is to assume both copies are
+compromised and force re-authentication on every session for that
+user. The user's re-login re-establishes trust; the attacker's copy
+becomes inert.
+
+**Alternatives considered:**
+- **Revoke only the reused token's lineage** — rejected. Distinguishing
+  lineages requires a parent-pointer chain, and the attacker's
+  rotations would sever it on the legitimate user's next refresh.
+  The blanket revoke is simpler and strictly safer.
+- **Flag suspicious activity and let the user log in to confirm** —
+  rejected as premature. No UX for this exists yet; a hard revoke
+  with a clear error code is the right starting point.
+
+**Consequences:**
+- A reuse event logs every user out of every device, across every
+  consuming app. User must re-authenticate everywhere.
+- Any future suspicious-activity UI would layer on top of this
+  behavior, not replace it.
