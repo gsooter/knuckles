@@ -36,6 +36,13 @@ def test_jwks_endpoint_publishes_public_key(client: FlaskClient) -> None:
     assert jwk["alg"] == "RS256"
 
 
+def test_jwks_versioned_alias_returns_same_body(client: FlaskClient) -> None:
+    canonical = client.get("/.well-known/jwks.json")
+    alias = client.get("/v1/auth/jwks")
+    assert alias.status_code == 200
+    assert alias.get_json() == canonical.get_json()
+
+
 def test_unknown_route_returns_json_error(client: FlaskClient) -> None:
     response = client.get("/does-not-exist")
     assert response.status_code == 404

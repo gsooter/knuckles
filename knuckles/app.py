@@ -41,8 +41,13 @@ def create_app() -> Flask:
         return {"status": "ok"}, 200
 
     @app.route("/.well-known/jwks.json")
+    @app.route("/v1/auth/jwks")
     def jwks() -> tuple[dict[str, Any], int]:
         """Publish Knuckles' current signing public keys as a JWKS.
+
+        Served at both ``/.well-known/jwks.json`` (the standard
+        discovery path) and ``/v1/auth/jwks`` (versioned alias for
+        callers that want everything under ``/v1``).
 
         Returns:
             Tuple of JWKS JSON body and HTTP 200. Consuming apps fetch
