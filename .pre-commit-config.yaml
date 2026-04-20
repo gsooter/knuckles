@@ -1,0 +1,37 @@
+default_language_version:
+  python: python3.12
+
+default_stages: [pre-commit]
+
+repos:
+  - repo: local
+    hooks:
+      - id: black
+        name: black
+        entry: .venv/bin/black --check --force-exclude 'knuckles/migrations/'
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      - id: ruff
+        name: ruff
+        entry: .venv/bin/ruff check --force-exclude
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      - id: mypy
+        name: mypy
+        entry: .venv/bin/mypy knuckles
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest
+        name: pytest
+        entry: .venv/bin/pytest --cov=knuckles --cov-fail-under=80 -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
