@@ -4,15 +4,19 @@ Knuckles sends exactly one kind of email in P3 — the magic-link — but
 the adapter is factored so future ceremonies (passkey recovery, account
 deletion confirmation) can plug in without editing the service layer.
 
-The production backend is SendGrid. Tests substitute an in-process
-fake. The :class:`EmailSender` protocol exists to formalize that seam
-so the service layer can type-annotate the dependency without a hard
-import of :class:`SendGridEmailSender`.
+The production backend is SendGrid. Local development (no
+``SENDGRID_API_KEY`` set) falls through to :class:`ConsoleEmailSender`,
+which prints the would-be email to stdout so the magic-link URL is
+copy-pasteable from the Knuckles process log. Tests substitute an
+in-process fake. The :class:`EmailSender` protocol exists to formalize
+that seam so the service layer can type-annotate the dependency without
+a hard import of any concrete sender class.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Protocol
 
 from sendgrid import SendGridAPIClient
@@ -87,11 +91,52 @@ class SendGridEmailSender:
             )
 
 
+class ConsoleEmailSender:
+    """Development email backend that logs outgoing mail to stdout.
+
+    Used automatically when ``SENDGRID_API_KEY`` is empty so local
+    magic-link testing does not require a real SendGrid account. The
+    body is scanned for an ``http(s)://…`` URL which is printed on its
+    own line to make the sign-in link easy to copy from the terminal.
+    """
+
+    _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
+
+    def send(self, *, to: str, subject: str, body: str) -> None:
+        """Print an email to stdout instead of delivering it.
+
+        Args:
+            to: Recipient email address (logged but not used).
+            subject: Email subject line.
+            body: Email body. Scanned for an ``http(s)://`` URL which is
+                echoed separately for easy copying.
+        """
+        match = self._URL_RE.search(body)
+        link = match.group(0) if match else "(no link found in body)"
+        _logger.warning(
+            "[ConsoleEmailSender] dev email — SendGrid unconfigured.\n"
+            "  To:      %s\n"
+            "  Subject: %s\n"
+            "  Link:    %s",
+            to,
+            subject,
+            link,
+        )
+
+
 def get_default_sender() -> EmailSender:
     """Return the configured default email backend.
 
+    When ``SENDGRID_API_KEY`` is unset we fall back to
+    :class:`ConsoleEmailSender` so local development can exercise the
+    magic-link flow without real email delivery. Production deploys set
+    the key and get :class:`SendGridEmailSender`. Callers are expected
+    to inject their own sender in tests.
+
     Returns:
-        A :class:`SendGridEmailSender` instance. Callers are expected
-        to inject their own sender in tests.
+        A concrete :class:`EmailSender` implementation.
     """
+    settings = get_settings()
+    if not settings.sendgrid_api_key:
+        return ConsoleEmailSender()
     return SendGridEmailSender()
