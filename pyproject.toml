@@ -21,7 +21,6 @@ dependencies = [
     "cryptography>=42.0,<46",
     "PyJWT[crypto]>=2.8,<3",
     "requests>=2.31,<3",
-    "sendgrid>=6.11,<7",
     "webauthn>=2.0,<3",
     "gunicorn>=21.2,<23",
 ]
@@ -93,7 +92,7 @@ exclude = ["knuckles/migrations/"]
 disable_error_code = ["comparison-overlap", "list-item", "union-attr", "unused-ignore"]
 
 [[tool.mypy.overrides]]
-module = ["sendgrid.*", "webauthn.*"]
+module = ["webauthn.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

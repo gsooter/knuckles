@@ -105,7 +105,7 @@ def start_magic_link(
             caller's job).
         redirect_url: Verify endpoint on the consuming app. The raw
             token is appended as a ``token=`` query string parameter.
-        sender: Optional email backend. Defaults to SendGrid.
+        sender: Optional email backend. Defaults to Resend.
     """
     settings = get_settings()
     raw_token = _generate_token()

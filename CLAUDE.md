@@ -233,7 +233,7 @@ Required at startup:
 - `KNUCKLES_STATE_SECRET`
 
 Identity-path optional (empty means the path is not enabled):
-- `SENDGRID_API_KEY`, `SENDGRID_FROM_EMAIL`
+- `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
 - `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`
 - `APPLE_OAUTH_CLIENT_ID`, `APPLE_OAUTH_TEAM_ID`,
   `APPLE_OAUTH_KEY_ID`, `APPLE_OAUTH_PRIVATE_KEY`
@@ -252,7 +252,7 @@ pytest --cov=knuckles --cov-fail-under=80
 
 - Tests live in `tests/` mirroring the source structure.
 - Mock external HTTP (Google token endpoint, Apple token endpoint,
-  SendGrid) in unit tests; integration tests hit a real
+  Resend) in unit tests; integration tests hit a real
   `knuckles_test` Postgres database.
 - Never test implementation details — test behavior and outcomes.
 - 80% coverage applies across `services/`, `data/repositories/`,

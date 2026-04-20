@@ -36,8 +36,10 @@ class Settings(BaseSettings):
             because state tokens never leave Knuckles.
         magic_link_ttl_seconds: How long a magic-link token stays
             redeemable before ``expires_at`` invalidates it.
-        sendgrid_api_key: SendGrid API key for magic-link emails.
-        sendgrid_from_email: Sender email address for SendGrid.
+        resend_api_key: Resend API key for magic-link emails.
+        resend_from_email: Sender address used on outgoing magic-link
+            emails. Must be a verified Resend sender — typically
+            ``Name <noreply@your-domain>``.
         google_oauth_client_id: Google OAuth client id. Empty when
             Google path is not configured.
         google_oauth_client_secret: Google OAuth client secret.
@@ -80,9 +82,9 @@ class Settings(BaseSettings):
     # Magic link
     magic_link_ttl_seconds: int = 15 * 60
 
-    # SendGrid
-    sendgrid_api_key: str = ""
-    sendgrid_from_email: str = ""
+    # Resend
+    resend_api_key: str = ""
+    resend_from_email: str = ""
 
     # Google OAuth
     google_oauth_client_id: str = ""

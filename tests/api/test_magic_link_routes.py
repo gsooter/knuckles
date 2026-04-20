@@ -34,7 +34,7 @@ class _FakeEmailSender:
         self.sent: list[tuple[str, str, str]] = []
 
     def send(self, *, to: str, subject: str, body: str) -> None:
-        """Record a magic-link send instead of hitting SendGrid.
+        """Record a magic-link send instead of hitting Resend.
 
         Args:
             to: Recipient email address.
@@ -63,7 +63,7 @@ def app(
     """Build the Knuckles Flask app with ``get_db`` and email injected.
 
     Overrides the conftest ``app`` fixture so the magic-link routes pull
-    the recording fake instead of constructing a SendGrid client.
+    the recording fake instead of constructing a Resend client.
 
     Args:
         db_session: The SQLite-backed SQLAlchemy session fixture.

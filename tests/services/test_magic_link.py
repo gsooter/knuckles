@@ -38,7 +38,7 @@ class _FakeEmailSender:
         self.sent: list[tuple[str, str, str]] = []
 
     def send(self, *, to: str, subject: str, body: str) -> None:
-        """Record the send instead of hitting SendGrid.
+        """Record the send instead of hitting Resend.
 
         Args:
             to: Recipient email address.

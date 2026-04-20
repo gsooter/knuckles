@@ -18,7 +18,7 @@ app re-implements sign-in.
   login UI.
 - **Sign in with Apple**.
 - **Sign in with Google**.
-- **Email magic link** (SendGrid).
+- **Email magic link** (Resend).
 
 ## Token model
 

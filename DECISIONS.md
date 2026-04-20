@@ -356,23 +356,23 @@ becomes inert.
 **Decision:** The email-sender seam is defined by
 :class:`knuckles.services.email.EmailSender`, a `typing.Protocol` with
 a single ``send(*, to, subject, body)`` method. Concrete senders
-(:class:`SendGridEmailSender`, the in-process test fake) implement
+(:class:`ResendEmailSender`, the in-process test fake) implement
 the protocol structurally — no inheritance, no shared base class.
 Service-layer functions accept ``EmailSender | None`` and fall back
 to :func:`get_default_sender` when the caller passes nothing.
 
 **Rationale:**
 A Protocol gives the service layer typed dependency injection without
-forcing tests to import SendGrid (which would either need a network
-stub or a heavyweight monkeypatch on ``SendGridAPIClient``). Tests
-hand-roll a recorder class with `send` and a `sent` list; production
-constructs the SendGrid client. Both pass the same type check.
+forcing tests to import the HTTP client used by the production sender.
+Tests hand-roll a recorder class with `send` and a `sent` list;
+production makes a direct HTTP call to Resend. Both pass the same
+type check.
 
 **Alternatives considered:**
 - **Abstract base class** — rejected. Inheritance ties tests to the
   abstract type's import graph (and any side effects in that module).
-  A Protocol is structurally typed, so the test fake never imports
-  SendGrid.
+  A Protocol is structurally typed, so the test fake never has to
+  import the production sender.
 - **Function-based seam (pass a `Callable`)** — rejected. The
   surface is a single method today but will grow (multipart bodies,
   attachments, idempotency keys) and a class is the cleaner shape
@@ -382,8 +382,10 @@ constructs the SendGrid client. Both pass the same type check.
 - Adding a new email backend (e.g., a queue-backed asynchronous
   sender) means writing a new class with `send` — no registration,
   no config switch, no plugin registry.
-- The service layer never imports SendGrid — only :func:`get_default_sender`
-  does, which keeps the dependency graph shallow for tests.
+- The service layer never imports the production sender — only
+  :func:`get_default_sender` does, which keeps the dependency graph
+  shallow for tests. The 2026-04-20 swap from SendGrid to Resend was
+  a single-file change because of this seam.
 
 ---
 
