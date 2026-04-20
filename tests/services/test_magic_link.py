@@ -30,22 +30,32 @@ class _FakeEmailSender:
     """In-process recorder that captures magic-link emails.
 
     Attributes:
-        sent: List of the (to, subject, body) tuples captured in order.
+        sent: List of the (to, subject, body, from_name) tuples captured
+            in order.
     """
 
     def __init__(self) -> None:
         """Initialize an empty capture list."""
-        self.sent: list[tuple[str, str, str]] = []
+        self.sent: list[tuple[str, str, str, str | None]] = []
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> None:
         """Record the send instead of hitting Resend.
 
         Args:
             to: Recipient email address.
             subject: Email subject line.
             body: Email body (plain text or HTML).
+            from_name: Optional display name the ``From`` header should
+                use.
         """
-        self.sent.append((to, subject, body))
+        self.sent.append((to, subject, body, from_name))
 
 
 @pytest.fixture()
@@ -127,10 +137,14 @@ def test_start_magic_link_sends_email_and_persists_hash(
     assert _aware(rows[0].expires_at) > datetime.now(tz=UTC)
 
     assert len(email_sender.sent) == 1
-    to, _subject, body = email_sender.sent[0]
+    to, subject, body, from_name = email_sender.sent[0]
     assert to == "user@example.com"
     # Body must contain a link with a token — check presence, not exact value.
     assert "http://localhost:3000/auth/verify?token=" in body
+    # Branding: recipient should see the calling app, not generic Knuckles copy.
+    assert subject == "Sign in to Greenroom"
+    assert from_name == "Greenroom"
+    assert "Greenroom" in body
 
 
 def test_start_magic_link_plaintext_token_is_never_persisted(

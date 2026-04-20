@@ -38,7 +38,14 @@ class EmailSender(Protocol):
     monkeypatching HTTP internals.
     """
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> None:
         """Deliver one email.
 
         Args:
@@ -46,6 +53,10 @@ class EmailSender(Protocol):
             subject: Email subject line.
             body: Email body. Implementations are free to send it as
                 either plain text or HTML.
+            from_name: Optional display name for the ``From`` header
+                (e.g. ``"Greenroom"``). When provided, recipients see
+                ``"{from_name} <{sender-email}>"`` in their inbox. The
+                configured sender address is used regardless.
         """
         ...
 
@@ -61,21 +72,34 @@ class ResendEmailSender:
     to handle regardless of transport.
     """
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> None:
         """Deliver an email via Resend.
 
         Args:
             to: Recipient email address.
             subject: Email subject line.
             body: Email body. Sent as HTML so ``<a>`` links render.
+            from_name: Optional display name wrapped around the
+                configured sender address (e.g. ``Greenroom
+                <auth@knuckles.example>``). When omitted, the raw
+                sender address is used.
 
         Raises:
             AppError: With code ``EMAIL_DELIVERY_FAILED`` if Resend
                 returns a non-2xx response or the HTTP call raises.
         """
         settings = get_settings()
+        sender = settings.resend_from_email
+        from_header = f"{from_name} <{sender}>" if from_name else sender
         payload = {
-            "from": settings.resend_from_email,
+            "from": from_header,
             "to": [to],
             "subject": subject,
             "html": body,
@@ -123,7 +147,14 @@ class ConsoleEmailSender:
 
     _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> None:
         """Print an email to stdout instead of delivering it.
 
         Args:
@@ -131,14 +162,18 @@ class ConsoleEmailSender:
             subject: Email subject line.
             body: Email body. Scanned for an ``http(s)://`` URL which is
                 echoed separately for easy copying.
+            from_name: Optional display name (logged but not otherwise
+                used — the console sender has nowhere to put it).
         """
         match = self._URL_RE.search(body)
         link = match.group(0) if match else "(no link found in body)"
         _logger.warning(
             "[ConsoleEmailSender] dev email — Resend unconfigured.\n"
+            "  From:    %s\n"
             "  To:      %s\n"
             "  Subject: %s\n"
             "  Link:    %s",
+            from_name or "(no display name)",
             to,
             subject,
             link,

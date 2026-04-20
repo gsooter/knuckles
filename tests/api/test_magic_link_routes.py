@@ -26,22 +26,31 @@ class _FakeEmailSender:
     """Test double recording each magic-link send.
 
     Attributes:
-        sent: List of ``(to, subject, body)`` tuples in send order.
+        sent: List of ``(to, subject, body, from_name)`` tuples in send
+            order.
     """
 
     def __init__(self) -> None:
         """Initialize an empty send log."""
-        self.sent: list[tuple[str, str, str]] = []
+        self.sent: list[tuple[str, str, str, str | None]] = []
 
-    def send(self, *, to: str, subject: str, body: str) -> None:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        from_name: str | None = None,
+    ) -> None:
         """Record a magic-link send instead of hitting Resend.
 
         Args:
             to: Recipient email address.
             subject: Email subject line.
             body: HTML email body.
+            from_name: Optional display name for the ``From`` header.
         """
-        self.sent.append((to, subject, body))
+        self.sent.append((to, subject, body, from_name))
 
 
 @pytest.fixture()
@@ -165,7 +174,7 @@ def test_start_magic_link_sends_email_and_returns_202(
     )
     assert response.status_code == 202
     assert len(email_sender.sent) == 1
-    to, _subject, body = email_sender.sent[0]
+    to, _subject, body, _from_name = email_sender.sent[0]
     assert to == "user@example.com"
     assert "http://localhost:3000/auth/verify?token=" in body
 

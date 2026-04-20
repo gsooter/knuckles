@@ -72,19 +72,61 @@ def _build_link(redirect_url: str, raw_token: str) -> str:
     return f"{redirect_url}{separator}{urlencode({'token': raw_token})}"
 
 
-def _render_email_body(link: str) -> str:
+_EMAIL_TEMPLATE = """\
+<!DOCTYPE html>
+<html>
+  <body style="margin:0;padding:0;background:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background:#f5f5f5;padding:40px 20px;">
+      <tr>
+        <td align="center">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="480" style="max-width:480px;background:#ffffff;border-radius:12px;border:1px solid #e5e5e5;">
+            <tr>
+              <td style="padding:40px 40px 24px;text-align:center;">
+                <h1 style="margin:0;font-size:22px;font-weight:600;color:#1a1a1a;letter-spacing:-0.3px;">{app_name}</h1>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 40px 32px;">
+                <p style="margin:0 0 24px;font-size:16px;line-height:1.5;color:#333;">Click the button below to sign in. This link expires in 15 minutes and can only be used once.</p>
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                  <tr>
+                    <td align="center" style="padding:8px 0 24px;">
+                      <a href="{link}" style="display:inline-block;padding:14px 28px;background:#1a1a1a;color:#ffffff;text-decoration:none;border-radius:8px;font-size:15px;font-weight:500;">Sign in to {app_name}</a>
+                    </td>
+                  </tr>
+                </table>
+                <p style="margin:0 0 8px;font-size:13px;line-height:1.5;color:#666;">Or paste this link into your browser:</p>
+                <p style="margin:0;font-size:13px;line-height:1.5;color:#888;word-break:break-all;"><a href="{link}" style="color:#888;text-decoration:underline;">{link}</a></p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 40px 32px;border-top:1px solid #eee;">
+                <p style="margin:24px 0 0;font-size:12px;line-height:1.5;color:#999;">If you didn't request this email, you can safely ignore it.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>
+"""
+
+
+def _render_email_body(link: str, app_name: str) -> str:
     """Render the HTML body of the magic-link email.
 
     Args:
         link: The fully-assembled magic-link URL.
+        app_name: Display name of the requesting app; rendered in the
+            email header and the call-to-action button so the recipient
+            sees consistent branding between the UI they started from
+            and the email they received.
 
     Returns:
         HTML body content for the outgoing email.
     """
-    return (
-        "<p>Click the link below to sign in. It expires in 15 minutes.</p>"
-        f'<p><a href="{link}">{link}</a></p>'
-    )
+    return _EMAIL_TEMPLATE.format(link=link, app_name=app_name)
 
 
 def start_magic_link(
@@ -119,14 +161,16 @@ def start_magic_link(
         token_hash=token_hash,
         expires_at=expires_at,
     )
-    # Binding is retained on the row for audit but unused at runtime today.
-    _ = app_client_id
+
+    app_client = repo.get_app_client(session, app_client_id)
+    app_name = app_client.app_name if app_client is not None else "your account"
 
     link = _build_link(redirect_url, raw_token)
     (sender or get_default_sender()).send(
         to=email,
-        subject="Your sign-in link",
-        body=_render_email_body(link),
+        subject=f"Sign in to {app_name}",
+        body=_render_email_body(link, app_name),
+        from_name=app_name,
     )
 
 
