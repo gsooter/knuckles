@@ -141,7 +141,12 @@ class UserOAuthProvider(TimestampMixin, Base):
         index=True,
     )
     provider: Mapped[OAuthProvider] = mapped_column(
-        Enum(OAuthProvider, name="knuckles_oauth_provider", native_enum=True),
+        Enum(
+            OAuthProvider,
+            name="knuckles_oauth_provider",
+            native_enum=True,
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
         nullable=False,
     )
     provider_user_id: Mapped[str] = mapped_column(
