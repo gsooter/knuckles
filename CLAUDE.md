@@ -83,6 +83,17 @@ future consuming app might want. Knuckles stays identity-only forever.
 
 10. **Never add a music service.** See the Hard Rule above.
 
+11. **Native-enum columns must pin `values_callable`.** Whenever a
+    SQLAlchemy `Enum(...)` column is backed by a PostgreSQL native
+    enum (`native_enum=True`), pass
+    `values_callable=lambda enum_cls: [e.value for e in enum_cls]`
+    so SQLAlchemy sends the member *values* to Postgres rather than
+    the member *names*. Without it, a Python enum like
+    `OAuthProvider.GOOGLE = "google"` ends up writing `"GOOGLE"` to
+    a column whose DB enum type allows only `"google"` — a 500 at
+    insert time that slips past unit tests because SQLite ignores
+    the native enum constraint.
+
 ---
 
 ## Architecture
