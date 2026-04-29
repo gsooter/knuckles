@@ -126,12 +126,7 @@ from flask import Flask, render_template_string, request, redirect, url_for, ses
 from dotenv import load_dotenv
 
 from knuckles import client
-from knuckles_client.exceptions import (
-    KnucklesAuthError,
-    KnucklesTokenError,
-    RefreshTokenReusedError,
-    RefreshTokenExpiredError,
-)
+from knuckles_client.exceptions import KnucklesAuthError, KnucklesTokenError
 
 load_dotenv()
 
@@ -208,6 +203,12 @@ def google_callback():
     return redirect("/")
 ```
 
+The Python SDK exposes the start-and-complete pair on each ceremony
+sub-client (`client.google`, `client.apple`, `client.magic_link`,
+`client.passkey`). Refresh, logout, profile, and JWT verification
+sit at the **top level** — `client.refresh`, `client.logout`,
+`client.me`, `client.verify_access_token`.
+
 The `_store_session` helper writes the access token and the user's
 identity into Flask's session cookie, and tucks the refresh token
 into a server-side store (we'll use the session for both for
@@ -256,7 +257,7 @@ def magic_link_start():
 def magic_link_verify():
     """Redeem the magic-link token from the URL."""
     token = request.args["token"]
-    pair = client.magic_link.verify(token=token)
+    pair = client.magic_link.verify(token)
     _store_session(pair.access_token, pair.refresh_token)
     return redirect("/")
 ```
@@ -330,12 +331,14 @@ def _try_refresh() -> bool:
     if not refresh:
         return False
     try:
-        pair = client.tokens.refresh(refresh_token=refresh)
-    except (RefreshTokenReusedError, RefreshTokenExpiredError):
-        # Either the token leaked and was used elsewhere (reuse-detected),
-        # or its 30-day window elapsed. Either way the user must sign in.
-        session.clear()
-        return False
+        pair = client.refresh(refresh)
+    except KnucklesAuthError as exc:
+        if exc.code in {"REFRESH_TOKEN_REUSED", "REFRESH_TOKEN_EXPIRED"}:
+            # Either the token leaked and was used elsewhere (reuse-detected),
+            # or its 30-day window elapsed. Either way the user must sign in.
+            session.clear()
+            return False
+        raise
     session["access_token"] = pair.access_token
     session["refresh_token"] = pair.refresh_token  # IMPORTANT: rotate
     return True
@@ -344,9 +347,14 @@ def _try_refresh() -> bool:
 {: .important }
 **Always store the new refresh token from the response.** Knuckles
 rotates refresh tokens — the old one becomes invalid the moment
-you use it. If you forget to update your storage, the next
-refresh attempt fires `RefreshTokenReusedError` and the user is
-signed out everywhere.
+you use it. If you forget to update your storage, the next refresh
+attempt raises `KnucklesAuthError(code="REFRESH_TOKEN_REUSED")` and
+the user is signed out everywhere.
+
+The SDK doesn't have a separate `RefreshTokenReusedError` class —
+both reuse and expiry surface as `KnucklesAuthError` and you switch
+on `exc.code` to tell them apart. The full code vocabulary lives in
+`knuckles/core/exceptions.py`.
 
 ---
 
@@ -359,14 +367,14 @@ def logout():
     refresh = session.get("refresh_token")
     if refresh:
         try:
-            client.tokens.revoke(refresh_token=refresh)
+            client.logout(refresh)
         except KnucklesAuthError:
             pass  # Already revoked / expired — fine, just clear locally.
     session.clear()
     return redirect("/")
 ```
 
-`tokens.revoke` is idempotent — if the token's already used or
+`client.logout` is idempotent — if the token's already used or
 expired, it's a no-op.
 
 ---
@@ -396,8 +404,8 @@ That's a complete integration. ✅
 [ user ] →  /  →  /sign-in  →  /sign-in/google → Google → /auth/google/callback
                                 /sign-in/magic-link → Resend → /auth/verify
 [ user ] →  /me  →  signed_in decorator → verify_access_token (cached JWKS, local)
-                                       → on 401: _try_refresh → tokens.refresh
-[ user ] →  /logout  →  tokens.revoke + session.clear
+                                       → on 401: _try_refresh → client.refresh
+[ user ] →  /logout  →  client.logout + session.clear
 ```
 
 The whole sign-in story in one page, with no Knuckles internals
@@ -408,18 +416,18 @@ leaking into your code.
 ## Common patterns from here
 
 - **Want to call Knuckles for the user profile?** Use
-  `client.users.me(access_token=session["access_token"])`. It returns
-  a fresh copy of the user's profile (in case they updated it
-  somewhere else).
-- **Want to enroll passkeys?** Add `passkey.register_begin()` /
-  `passkey.register_complete()` once a user is signed in. The
-  walkthrough is in the [TypeScript guide](typescript.html#passkeys)
+  `client.me(access_token=session["access_token"])`. It returns a
+  fresh copy of the user's profile (in case they updated it somewhere
+  else).
+- **Want to enroll passkeys?** Add `client.passkey.register_begin()`
+  / `client.passkey.register_complete()` once a user is signed in.
+  The walkthrough is in the [TypeScript guide](typescript.html#passkeys)
   because you need browser JS to do the WebAuthn API call — the
   Python pattern is the same on the backend, with the browser doing
   the cryptography in between.
 - **Want to log the user out of every device, not just this one?** Use
-  `client.tokens.revoke_all(access_token=...)`. Hits
-  `/v1/logout/all`, which kills every refresh token for the user.
+  `client.logout_all(access_token=...)`. Hits `/v1/logout/all`, which
+  kills every refresh token for the user.
 
 See [Recipes](recipes.html) for these and more.
 

@@ -163,10 +163,9 @@ You'll store two things in the browser:
 When the access token expires:
 - The browser sends the now-expired access token.
 - Your backend's middleware sees it's expired, looks up the
-  server-side refresh token, calls
-  `client.tokens.refresh(refresh_token=...)`, gets a new pair, sets
-  the new access token cookie, stores the new refresh token, and
-  retries the request.
+  server-side refresh token, calls `client.refresh(refresh_token)`,
+  gets a new pair, sets the new access token cookie, stores the new
+  refresh token, and retries the request.
 
 This is the **"silent refresh"** pattern. The user never sees an
 auth prompt — their session just keeps working.
@@ -175,16 +174,22 @@ auth prompt — their session just keeps working.
 
 ## Error handling, in three buckets
 
-Every Knuckles error has a typed exception in the SDK:
+Every Knuckles error surfaces as a typed exception:
 
-| What happened | Exception | What your app should do |
-|---|---|---|
-| Refresh token was already used | `RefreshTokenReusedError` | Sign the user out everywhere. Surface "you've been signed out for security reasons." |
-| Refresh token's 30 days elapsed | `RefreshTokenExpiredError` | Send the user back to the sign-in page. |
-| Access token is invalid / expired | `TokenError` | Try a refresh. If that also fails, send to sign-in. |
-| User typed magic-link email too fast | `RateLimitError` | Show "try again in a minute." |
-| Bad input (caller's fault) | `ValidationError` | Treat as a bug. Don't surface to the user. |
-| Knuckles unreachable | `NetworkError` | Retry with backoff. Fail closed for protected resources. |
+| What happened | Exception | How to detect | What your app should do |
+|---|---|---|---|
+| Refresh token was already used | `KnucklesAuthError` | `exc.code == "REFRESH_TOKEN_REUSED"` | Sign the user out everywhere. Surface "you've been signed out for security reasons." |
+| Refresh token's 30 days elapsed | `KnucklesAuthError` | `exc.code == "REFRESH_TOKEN_EXPIRED"` | Send the user back to the sign-in page. |
+| Access token is invalid / expired | `KnucklesTokenError` | catch by class | Try a refresh. If that also fails, send to sign-in. |
+| User typed magic-link email too fast | `KnucklesRateLimitError` | catch by class | Show "try again in a minute." |
+| Bad input (caller's fault) | `KnucklesValidationError` | catch by class | Treat as a bug. Don't surface to the user. |
+| Knuckles unreachable | `KnucklesNetworkError` | catch by class | Retry with backoff. Fail closed for protected resources. |
+
+Refresh-token reuse and expiry both come back as `KnucklesAuthError`
+— you switch on `exc.code` (Python) or `err.code` (TS) to tell them
+apart. The full code vocabulary lives in
+`knuckles/core/exceptions.py` (e.g., `INVALID_CLIENT`,
+`MAGIC_LINK_EXPIRED`, `PASSKEY_AUTH_FAILED`).
 
 The SDKs raise these with the same names and the same shape across
 Python and TypeScript.

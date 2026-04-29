@@ -216,7 +216,7 @@ app.post('/sign-in/magic-link', async (req, res) => {
 
 app.get('/auth/verify', async (req, res) => {
   const token = String(req.query.token)
-  const pair = await knuckles.magicLink.verify({ token })
+  const pair = await knuckles.magicLink.verify(token)
   await persistSession(res, pair)
   res.redirect('/')
 })
@@ -231,7 +231,7 @@ terminal for the link, paste it. Land on `/` signed in.
 
 ```ts
 import type { NextFunction, Request, Response } from 'express'
-import { TokenError, RefreshTokenReusedError, RefreshTokenExpiredError } from '@knuckles/client'
+import { KnucklesTokenError, KnucklesAuthError } from '@knuckles/client'
 
 declare module 'express' {
   interface Request {
@@ -251,7 +251,7 @@ async function requireSignIn(req: Request, res: Response, next: NextFunction): P
   try {
     claims = await knuckles.verifyAccessToken(row.accessToken)
   } catch (err) {
-    if (!(err instanceof TokenError)) throw err
+    if (!(err instanceof KnucklesTokenError)) throw err
     // Try silent refresh.
     if (!(await tryRefresh(row))) {
       sessions.delete(sid)
@@ -278,12 +278,15 @@ app.get('/me', requireSignIn, (req, res) => {
 ```ts
 async function tryRefresh(row: SessionRow): Promise<boolean> {
   try {
-    const pair = await knuckles.tokens.refresh({ refreshToken: row.refreshToken })
+    const pair = await knuckles.refresh(row.refreshToken)
     row.accessToken = pair.accessToken
     row.refreshToken = pair.refreshToken  // IMPORTANT: rotate
     return true
   } catch (err) {
-    if (err instanceof RefreshTokenReusedError || err instanceof RefreshTokenExpiredError) {
+    if (
+      err instanceof KnucklesAuthError &&
+      (err.code === 'REFRESH_TOKEN_REUSED' || err.code === 'REFRESH_TOKEN_EXPIRED')
+    ) {
       return false
     }
     throw err
@@ -293,8 +296,10 @@ async function tryRefresh(row: SessionRow): Promise<boolean> {
 
 {: .important }
 **Always store the new refresh token from the response.** Knuckles
-rotates refresh tokens — the old one becomes invalid the moment
-you use it.
+rotates refresh tokens — the old one becomes invalid the moment you
+use it. The SDK doesn't have separate `RefreshTokenReused` /
+`RefreshTokenExpired` classes — both surface as `KnucklesAuthError`,
+and you switch on `err.code` to tell them apart.
 
 ---
 
@@ -306,7 +311,7 @@ app.get('/logout', async (req, res) => {
   const row = sid ? sessions.get(sid) : undefined
   if (row) {
     try {
-      await knuckles.tokens.revoke({ refreshToken: row.refreshToken })
+      await knuckles.logout(row.refreshToken)
     } catch { /* idempotent */ }
     sessions.delete(sid)
   }
@@ -418,10 +423,10 @@ experience available today.
 ## Common patterns from here
 
 - **Get the user's profile from Knuckles directly:**
-  `await knuckles.users.me({ accessToken: row.accessToken })` — useful
-  if the user updated their email elsewhere.
+  `await knuckles.me({ accessToken: row.accessToken })` — useful if
+  the user updated their email elsewhere.
 - **Sign the user out everywhere (every device):**
-  `await knuckles.tokens.revokeAll({ accessToken: row.accessToken })`.
+  `await knuckles.logoutAll({ accessToken: row.accessToken })`.
 
 See [Recipes](recipes.html) for these and more.
 

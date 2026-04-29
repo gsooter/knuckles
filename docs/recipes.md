@@ -54,7 +54,7 @@ def signed_in(view):
 ### TypeScript (Express)
 
 ```ts
-import { TokenError } from '@knuckles/client'
+import { KnucklesTokenError } from '@knuckles/client'
 
 export async function requireSignIn(req, res, next) {
   const sid = req.signedCookies['sid']
@@ -65,7 +65,7 @@ export async function requireSignIn(req, res, next) {
     req.user = { id: claims.sub, email: claims.email }
     next()
   } catch (err) {
-    if (err instanceof TokenError) return res.status(401).json({ error: 'unauthorized' })
+    if (err instanceof KnucklesTokenError) return res.status(401).json({ error: 'unauthorized' })
     throw err
   }
 }
@@ -81,20 +81,19 @@ without bothering the user.
 ### Python
 
 ```python
-from knuckles_client.exceptions import (
-    RefreshTokenReusedError,
-    RefreshTokenExpiredError,
-)
+from knuckles_client.exceptions import KnucklesAuthError
 
 def try_refresh(session) -> bool:
     refresh = session.get("refresh_token")
     if not refresh:
         return False
     try:
-        pair = client.tokens.refresh(refresh_token=refresh)
-    except (RefreshTokenReusedError, RefreshTokenExpiredError):
-        session.clear()
-        return False
+        pair = client.refresh(refresh)
+    except KnucklesAuthError as exc:
+        if exc.code in {"REFRESH_TOKEN_REUSED", "REFRESH_TOKEN_EXPIRED"}:
+            session.clear()
+            return False
+        raise
     session["access_token"] = pair.access_token
     session["refresh_token"] = pair.refresh_token  # ← rotate!
     return True
@@ -103,16 +102,19 @@ def try_refresh(session) -> bool:
 ### TypeScript
 
 ```ts
-import { RefreshTokenReusedError, RefreshTokenExpiredError } from '@knuckles/client'
+import { KnucklesAuthError } from '@knuckles/client'
 
 async function tryRefresh(row): Promise<boolean> {
   try {
-    const pair = await knuckles.tokens.refresh({ refreshToken: row.refreshToken })
+    const pair = await knuckles.refresh(row.refreshToken)
     row.accessToken = pair.accessToken
     row.refreshToken = pair.refreshToken  // ← rotate!
     return true
   } catch (err) {
-    if (err instanceof RefreshTokenReusedError || err instanceof RefreshTokenExpiredError) {
+    if (
+      err instanceof KnucklesAuthError &&
+      (err.code === 'REFRESH_TOKEN_REUSED' || err.code === 'REFRESH_TOKEN_EXPIRED')
+    ) {
       return false
     }
     throw err
@@ -139,7 +141,7 @@ from knuckles_client.exceptions import KnucklesAuthError
 def logout():
     if refresh := session.get("refresh_token"):
         try:
-            client.tokens.revoke(refresh_token=refresh)
+            client.logout(refresh)
         except KnucklesAuthError:
             pass  # already revoked, fine
     session.clear()
@@ -154,7 +156,7 @@ app.get('/logout', async (req, res) => {
   const row = sid ? sessions.get(sid) : undefined
   if (row) {
     try {
-      await knuckles.tokens.revoke({ refreshToken: row.refreshToken })
+      await knuckles.logout(row.refreshToken)
     } catch { /* idempotent */ }
     sessions.delete(sid)
   }
@@ -175,7 +177,7 @@ Useful for "Sign out everywhere" buttons in account settings.
 @app.post("/account/sign-out-everywhere")
 @signed_in
 def sign_out_everywhere():
-    client.tokens.revoke_all(access_token=session["access_token"])
+    client.logout_all(access_token=session["access_token"])
     session.clear()
     return redirect("/")
 ```
@@ -185,7 +187,7 @@ def sign_out_everywhere():
 ```ts
 app.post('/account/sign-out-everywhere', requireSignIn, async (req, res) => {
   const row = sessions.get(req.signedCookies['sid'])!
-  await knuckles.tokens.revokeAll({ accessToken: row.accessToken })
+  await knuckles.logoutAll({ accessToken: row.accessToken })
   sessions.delete(req.signedCookies['sid'])
   res.clearCookie('sid')
   res.redirect('/')
@@ -206,14 +208,14 @@ still has the old value. To get the freshest copy:
 ### Python
 
 ```python
-profile = client.users.me(access_token=session["access_token"])
-# profile.email, profile.display_name, profile.avatar_url, profile.user_id
+profile = client.me(access_token=session["access_token"])
+# profile.id, profile.email, profile.display_name, profile.avatar_url
 ```
 
 ### TypeScript
 
 ```ts
-const profile = await knuckles.users.me({ accessToken: row.accessToken })
+const profile = await knuckles.me({ accessToken: row.accessToken })
 ```
 
 ---
@@ -306,7 +308,7 @@ to your own user table that you update on every sign-in:
 ```python
 @app.get("/auth/verify")
 def magic_link_verify():
-    pair = client.magic_link.verify(token=request.args["token"])
+    pair = client.magic_link.verify(request.args["token"])
     claims = client.verify_access_token(pair.access_token)
 
     user_row = my_db.upsert_user(

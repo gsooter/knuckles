@@ -264,8 +264,9 @@ audience claim has to match.
 ### My access token expired and the user got bounced. What do I do?
 
 Wire up silent refresh — see the [recipe](recipes.html#refresh-the-access-token-silently).
-The pattern: catch `TokenError`, call `tokens.refresh(...)` with the
-stored refresh token, get a new pair, retry the original request.
+The pattern: catch `KnucklesTokenError`, call `client.refresh(...)`
+with the stored refresh token, get a new pair, retry the original
+request.
 
 The user never sees the round trip.
 
