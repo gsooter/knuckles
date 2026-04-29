@@ -1,0 +1,117 @@
+# Build and publish `@knuckles/client` to npm on a version tag.
+#
+# Triggered by tags shaped `knuckles-client-ts-vX.Y.Z` so the same
+# repo can carry release tags for the Python SDK and future tooling
+# without cross-firing.
+#
+# Auth is **npm Trusted Publishing** (OIDC, npm 11.5+): no NPM_TOKEN
+# stored in GitHub. To enable it, the maintainer must:
+#   1. Own the `knuckles` scope on npm (create a free org under that
+#      name) OR rename the package to an unscoped name in package.json.
+#   2. On npmjs.com → package settings → "Publishing access" → add a
+#      Trusted Publisher with: GitHub user/org `gsooter`, repo
+#      `knuckles`, workflow filename `release-sdk-ts.yml`,
+#      environment `npm`.
+#   3. In this repo's Settings → Environments → create environment
+#      `npm` (no secrets needed).
+#
+# Provenance: every publish includes an npm provenance statement (a
+# signed link from the package back to the GitHub Actions run that
+# built it). Visible on the npm package page.
+
+name: release-sdk-ts
+
+on:
+  push:
+    tags:
+      - "knuckles-client-ts-v*"
+
+concurrency:
+  group: release-sdk-ts-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/knuckles-client-ts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: packages/knuckles-client-ts/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#knuckles-client-ts-v}"
+          pkg=$(node -p "require('./package.json').version")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag version ($tag) does not match package.json version ($pkg)."
+            exit 1
+          fi
+
+      - name: Verify VERSION constant matches package.json
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          src=$(grep -E "export const VERSION" src/index.ts | sed -E "s/.*'([^']+)'.*/\1/")
+          if [ "$pkg" != "$src" ]; then
+            echo "::error::package.json version ($pkg) does not match src/index.ts VERSION ($src)."
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload built tarball preview
+        run: npm pack --dry-run
+
+  publish:
+    name: Publish to npm
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # OIDC scope for npm Trusted Publishing.
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@knuckles/client
+    defaults:
+      run:
+        working-directory: packages/knuckles-client-ts
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+          cache-dependency-path: packages/knuckles-client-ts/package-lock.json
+
+      - name: Update npm to latest (Trusted Publishing requires npm 11.5+)
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Publish (Trusted Publishing + provenance)
+        run: npm publish --provenance --access public

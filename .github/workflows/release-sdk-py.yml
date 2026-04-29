@@ -1,0 +1,123 @@
+# Build and publish `knuckles-client` to PyPI on a version tag.
+#
+# Triggered by tags shaped `knuckles-client-py-vX.Y.Z` so the same
+# repo can carry release tags for sibling packages (TS SDK, future
+# tooling) without cross-firing.
+#
+# Auth is **Trusted Publishing** (PyPI's OIDC flow): no API token
+# stored in GitHub. To enable it, the maintainer must:
+#   1. Create the project on PyPI (publish 0.0.0 manually OR claim the
+#      name via Trusted Publisher's "pending publisher" flow).
+#   2. On the PyPI project page → Publishing → Add a pending publisher
+#      with: GitHub user/org `gsooter`, repo `knuckles`, workflow
+#      filename `release-sdk-py.yml`, environment `pypi`.
+#   3. In this repo's Settings → Environments → create environment
+#      `pypi` (no secrets needed; just the environment scoping).
+
+name: release-sdk-py
+
+on:
+  push:
+    tags:
+      - "knuckles-client-py-v*"
+
+# Concurrency guard — at most one release at a time.
+concurrency:
+  group: release-sdk-py-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Test before release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/knuckles-client-py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Black (format check)
+        run: black --check src tests
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Mypy strict
+        run: mypy src
+
+      - name: Pytest
+        run: pytest
+
+  build:
+    name: Build sdist + wheel
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/knuckles-client-py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#knuckles-client-py-v}"
+          pkg=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag version ($tag) does not match pyproject.toml version ($pkg)."
+            exit 1
+          fi
+
+      - name: Build
+        run: python -m build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: packages/knuckles-client-py/dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Trusted Publishing requires this OIDC scope.
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/knuckles-client/
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Trusted Publishing — no token, OIDC handles auth.
+          packages-dir: dist/
