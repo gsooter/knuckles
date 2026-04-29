@@ -1,0 +1,626 @@
+openapi: 3.1.0
+info:
+  title: Knuckles Identity Service API
+  version: "1.0.0"
+  description: |
+    Knuckles is a single-purpose identity service that owns user accounts
+    and four sign-in ceremonies (magic-link, Google, Apple, WebAuthn
+    passkey), and issues RS256-signed access tokens plus rotating opaque
+    refresh tokens. Consuming apps register as `app_clients` and validate
+    tokens locally against the public JWKS at `/.well-known/jwks.json`.
+
+    See `docs/ONBOARDING.md` for the integration guide and
+    `DECISIONS.md` for the architectural rationale behind every choice.
+  license:
+    name: Proprietary
+servers:
+  - url: https://auth.example.com
+    description: Production
+  - url: http://localhost:5001
+    description: Local dev
+
+tags:
+  - name: Discovery
+    description: Unauthenticated keys + service metadata
+  - name: Magic-link
+    description: Email magic-link sign-in
+  - name: Google
+    description: Sign in with Google (OAuth 2.0 + OIDC)
+  - name: Apple
+    description: Sign in with Apple (OAuth 2.0 + OIDC)
+  - name: Passkey
+    description: WebAuthn passkey registration, sign-in, and management
+  - name: Session
+    description: Refresh, logout, current user
+  - name: Operational
+    description: Health probe
+
+security:
+  - clientCredentials: []
+
+paths:
+  /health:
+    get:
+      tags: [Operational]
+      summary: Liveness probe for load balancers
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /.well-known/jwks.json:
+    get:
+      tags: [Discovery]
+      summary: Public keys for local token verification
+      security: []
+      responses:
+        "200":
+          description: JWKS document
+          headers:
+            Cache-Control:
+              description: Cacheable JWKS (default 10 minutes).
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JWKS" }
+
+  /v1/auth/jwks:
+    get:
+      tags: [Discovery]
+      summary: Versioned alias of `/.well-known/jwks.json`
+      security: []
+      responses:
+        "200":
+          description: JWKS document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JWKS" }
+
+  /.well-known/openid-configuration:
+    get:
+      tags: [Discovery]
+      summary: Partial OIDC discovery document
+      description: |
+        Knuckles is not a full OIDC provider — it has no `/authorize`
+        endpoint of its own — but exposes `issuer`, `jwks_uri`, and the
+        signing-algorithm advertisement so JWT-validation libraries
+        auto-configure with no extra code.
+      security: []
+      responses:
+        "200":
+          description: OIDC discovery document
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpenIDConfiguration" }
+
+  /v1/auth/magic-link/start:
+    post:
+      tags: [Magic-link]
+      summary: Send a magic-link email
+      description: |
+        Returns 202 regardless of whether the email is already
+        registered — no account-enumeration signal. Per-email rate
+        limited (default 5/hour).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, redirect_url]
+              properties:
+                email: { type: string, format: email }
+                redirect_url:
+                  type: string
+                  format: uri
+                  description: |
+                    Destination URL on the consuming app's frontend.
+                    The raw token is appended as `?token=<...>`. Origin
+                    must be in the calling app-client's
+                    `allowed_origins`.
+      responses:
+        "202":
+          description: Email queued
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/auth/magic-link/verify:
+    post:
+      tags: [Magic-link]
+      summary: Redeem a magic-link token for a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: Raw URL-safe token from the email URL. }
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPairEnvelope" }
+        "400":
+          description: Token invalid, expired, or already used
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401": { $ref: "#/components/responses/InvalidClient" }
+
+  /v1/auth/google/start:
+    post:
+      tags: [Google]
+      summary: Get the Google consent URL + state JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_url]
+              properties:
+                redirect_url: { type: string, format: uri }
+      responses:
+        "200":
+          description: Consent URL + state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CeremonyStartEnvelope" }
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /v1/auth/google/complete:
+    post:
+      tags: [Google]
+      summary: Finish the Google ceremony and mint a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state]
+              properties:
+                code: { type: string }
+                state: { type: string }
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPairEnvelope" }
+        "400":
+          description: Google ceremony failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/auth/apple/start:
+    post:
+      tags: [Apple]
+      summary: Get Apple consent URL + state JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [redirect_url]
+              properties:
+                redirect_url: { type: string, format: uri }
+      responses:
+        "200":
+          description: Consent URL + state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CeremonyStartEnvelope" }
+
+  /v1/auth/apple/complete:
+    post:
+      tags: [Apple]
+      summary: Finish the Apple ceremony and mint a session
+      description: |
+        Apple POSTs the `user` payload only on the first sign-in for
+        a given Apple ID. Forward it verbatim when present.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, state]
+              properties:
+                code: { type: string }
+                state: { type: string }
+                user:
+                  type: object
+                  description: First-sign-in name payload from Apple.
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPairEnvelope" }
+
+  /v1/auth/passkey/register/begin:
+    post:
+      tags: [Passkey]
+      summary: Get registration options for the signed-in user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Options + state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PasskeyChallengeEnvelope" }
+
+  /v1/auth/passkey/register/complete:
+    post:
+      tags: [Passkey]
+      summary: Verify the attestation and persist the credential
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential, state]
+              properties:
+                credential: { type: object }
+                state: { type: string }
+                name: { type: string, description: Optional human-facing label. }
+      responses:
+        "201":
+          description: Credential persisted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      credential_id: { type: string }
+
+  /v1/auth/passkey:
+    get:
+      tags: [Passkey]
+      summary: List the current user's passkeys
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User's passkey list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PasskeyDescriptor" }
+
+  /v1/auth/passkey/{credentialId}:
+    delete:
+      tags: [Passkey]
+      summary: Delete one of the current user's passkeys
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: credentialId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: No matching credential for this user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/auth/passkey/sign-in/begin:
+    post:
+      tags: [Passkey]
+      summary: Get discoverable-credential auth options
+      responses:
+        "200":
+          description: Options + state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PasskeyChallengeEnvelope" }
+
+  /v1/auth/passkey/sign-in/complete:
+    post:
+      tags: [Passkey]
+      summary: Verify the assertion and mint a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential, state]
+              properties:
+                credential: { type: object }
+                state: { type: string }
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPairEnvelope" }
+
+  /v1/token/refresh:
+    post:
+      tags: [Session]
+      summary: Rotate a refresh token into a new pair
+      description: |
+        Always store the new refresh token from the response. A second
+        presentation of an already-used refresh token returns
+        `REFRESH_TOKEN_REUSED` and revokes every refresh token for the
+        user — re-authentication is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPairEnvelope" }
+        "401":
+          description: Refresh token invalid, expired, reused, or for another client
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/logout:
+    post:
+      tags: [Session]
+      summary: Revoke the presented refresh token
+      description: Idempotent — unknown or used tokens succeed silently.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "204":
+          description: Revoked (or already inert)
+
+  /v1/logout/all:
+    post:
+      tags: [Session]
+      summary: Revoke every refresh token for the signed-in user
+      security:
+        - clientCredentials: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Count of revoked rows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      revoked: { type: integer, minimum: 0 }
+
+  /v1/me:
+    get:
+      tags: [Session]
+      summary: Current user's profile
+      security:
+        - clientCredentials: []
+        - bearerAuth: []
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/UserProfile" }
+
+components:
+  securitySchemes:
+    clientCredentials:
+      type: apiKey
+      description: |
+        App-client credentials shipped on every authenticated route. Two
+        headers: `X-Client-Id` and `X-Client-Secret`. The secret is
+        compared with `hmac.compare_digest` against a SHA-256 hash.
+      in: header
+      name: X-Client-Id
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: RS256 JWT issued by Knuckles. Validate locally via JWKS.
+
+  responses:
+    InvalidClient:
+      description: Missing or invalid `X-Client-*` headers
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    ValidationError:
+      description: Request body failed validation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    RateLimited:
+      description: Per-key budget exceeded
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - INVALID_TOKEN
+                - TOKEN_EXPIRED
+                - INVALID_CLIENT
+                - INVALID_SCOPE
+                - INVALID_GRANT
+                - USER_NOT_FOUND
+                - MAGIC_LINK_INVALID
+                - MAGIC_LINK_EXPIRED
+                - MAGIC_LINK_ALREADY_USED
+                - GOOGLE_AUTH_FAILED
+                - APPLE_AUTH_FAILED
+                - PASSKEY_AUTH_FAILED
+                - PASSKEY_REGISTRATION_FAILED
+                - EMAIL_DELIVERY_FAILED
+                - REFRESH_TOKEN_INVALID
+                - REFRESH_TOKEN_EXPIRED
+                - REFRESH_TOKEN_REUSED
+                - RATE_LIMITED
+                - SERVICE_NOT_CONNECTED
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - INTERNAL_SERVER_ERROR
+            message: { type: string }
+
+    JWKS:
+      type: object
+      required: [keys]
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            required: [kty, use, alg, kid, n, e]
+            properties:
+              kty: { type: string, enum: [RSA] }
+              use: { type: string, enum: [sig] }
+              alg: { type: string, enum: [RS256] }
+              kid: { type: string }
+              n: { type: string }
+              e: { type: string }
+
+    OpenIDConfiguration:
+      type: object
+      required: [issuer, jwks_uri, id_token_signing_alg_values_supported]
+      properties:
+        issuer: { type: string, format: uri }
+        jwks_uri: { type: string, format: uri }
+        id_token_signing_alg_values_supported:
+          type: array
+          items: { type: string }
+        response_types_supported:
+          type: array
+          items: { type: string }
+        subject_types_supported:
+          type: array
+          items: { type: string }
+        token_endpoint_auth_methods_supported:
+          type: array
+          items: { type: string }
+
+    TokenPair:
+      type: object
+      required:
+        - access_token
+        - access_token_expires_at
+        - refresh_token
+        - refresh_token_expires_at
+        - token_type
+      properties:
+        access_token: { type: string, description: RS256 JWT. }
+        access_token_expires_at: { type: string, format: date-time }
+        refresh_token: { type: string }
+        refresh_token_expires_at: { type: string, format: date-time }
+        token_type: { type: string, enum: [Bearer] }
+
+    TokenPairEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/TokenPair" }
+
+    CeremonyStart:
+      type: object
+      required: [authorize_url, state]
+      properties:
+        authorize_url: { type: string, format: uri }
+        state: { type: string, description: Signed state JWT. }
+
+    CeremonyStartEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/CeremonyStart" }
+
+    PasskeyChallenge:
+      type: object
+      required: [options, state]
+      properties:
+        options:
+          type: object
+          description: |
+            WebAuthn `PublicKeyCredentialCreationOptions` or
+            `PublicKeyCredentialRequestOptions`. JSON-encode and pass
+            to the browser.
+        state: { type: string }
+
+    PasskeyChallengeEnvelope:
+      type: object
+      properties:
+        data: { $ref: "#/components/schemas/PasskeyChallenge" }
+
+    PasskeyDescriptor:
+      type: object
+      required: [credential_id, name, transports, created_at, last_used_at]
+      properties:
+        credential_id: { type: string }
+        name: { type: [string, "null"] }
+        transports: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+
+    UserProfile:
+      type: object
+      required: [id, email, display_name, avatar_url, app_client_id]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: [string, "null"] }
+        avatar_url: { type: [string, "null"] }
+        app_client_id: { type: string }

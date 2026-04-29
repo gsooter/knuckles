@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knuckles — Identity Service API Reference</title>
+    <meta
+      name="description"
+      content="OpenAPI reference for Knuckles, a centralized identity and authentication service."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='0.9em' font-size='90'%3E🔑%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica,
+          Arial, sans-serif;
+      }
+      header {
+        padding: 18px 32px;
+        background: #1a1a1a;
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid #333;
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 600;
+      }
+      header nav a {
+        color: #ddd;
+        margin-left: 22px;
+        text-decoration: none;
+        font-size: 14px;
+      }
+      header nav a:hover {
+        color: #fff;
+        text-decoration: underline;
+      }
+      main {
+        height: calc(100vh - 65px);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Knuckles · API Reference</h1>
+      <nav>
+        <a href="https://github.com/gsooter/knuckles">GitHub</a>
+        <a href="https://pypi.org/project/knuckles-client/">Python SDK</a>
+        <a
+          href="https://github.com/gsooter/knuckles/blob/main/docs/INTEGRATION.md"
+          >Integration Guide</a
+        >
+        <a
+          href="https://github.com/gsooter/knuckles/blob/main/docs/ONBOARDING.md"
+          >Onboarding</a
+        >
+      </nav>
+    </header>
+    <main>
+      <!--
+        Redoc renders the OpenAPI spec from this same docs/ directory.
+        It's a single self-contained <script> — no build pipeline.
+        Update the spec at docs/openapi.yaml and the rendered reference
+        updates on the next page load.
+      -->
+      <redoc spec-url="./openapi.yaml" hide-loading></redoc>
+      <script
+        src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"
+        defer
+      ></script>
+    </main>
+  </body>
+</html>
