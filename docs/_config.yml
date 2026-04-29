@@ -1,0 +1,86 @@
+# Jekyll config for the Knuckles docs site.
+#
+# Source: this directory (docs/) on the main branch.
+# Theme: Just the Docs (loaded as a remote theme so we don't need a
+# Gemfile or `bundle install` — GitHub Pages fetches it directly).
+#
+# To preview locally (optional):
+#   gem install bundler jekyll
+#   bundle init
+#   bundle add jekyll just-the-docs jekyll-remote-theme
+#   bundle exec jekyll serve
+#
+# In production, GitHub Pages handles the build automatically the
+# moment a push lands on `main` that touches anything in `docs/`.
+
+title: Knuckles
+description: A drop-in identity service that handles user sign-in for your app.
+url: https://gsooter.github.io
+baseurl: /knuckles
+
+remote_theme: just-the-docs/just-the-docs
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+
+# ---------------------------------------------------------------------------
+# Theme appearance
+# ---------------------------------------------------------------------------
+
+color_scheme: light
+
+logo: ""
+
+# Sidebar layout: pages are ordered by their `nav_order` front-matter.
+nav_enabled: true
+search_enabled: true
+heading_anchors: true
+last_edit_timestamp: false
+
+# Aux links shown in the top right.
+aux_links:
+  "GitHub": "https://github.com/gsooter/knuckles"
+  "Python SDK": "https://pypi.org/project/knuckles-client/"
+  "npm package": "https://www.npmjs.com/package/@knuckles/client"
+
+aux_links_new_tab: true
+
+# Footer.
+footer_content: |
+  Knuckles is open source under the MIT license.
+
+# Hide the Redoc subdirectory from the auto-generated nav (it has its
+# own header and lives at /knuckles/api/).
+exclude:
+  - api/
+
+# ---------------------------------------------------------------------------
+# Callout components — used as `{: .note }`, `{: .warning }`, etc.
+# ---------------------------------------------------------------------------
+
+callouts_level: quiet
+callouts:
+  note:
+    title: Note
+    color: blue
+  tip:
+    title: Tip
+    color: green
+  warning:
+    title: Heads up
+    color: yellow
+  important:
+    title: Important
+    color: red
+
+# ---------------------------------------------------------------------------
+# Markdown / syntax highlighting
+# ---------------------------------------------------------------------------
+
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false

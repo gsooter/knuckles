@@ -1,147 +1,239 @@
-# Integrating with Knuckles
+---
+title: Integration
+layout: default
+nav_order: 5
+has_children: true
+description: "Add Knuckles to your existing app. Pick a language and follow along."
+---
 
-You're building an app that wants Knuckles to handle sign-in. This
-guide is your **shortest path from zero to "users can sign in."**
+# Integration
+{: .no_toc }
 
-If you want the full architectural background, read
-[`docs/ONBOARDING.md`](./ONBOARDING.md). This page is just enough to
-ship.
+You have Knuckles running. Now you want your app to use it. This
+page is the overview — read it once, then jump to your language.
+
+<details open markdown="block">
+<summary>Table of contents</summary>
+
+1. TOC
+{:toc}
+
+</details>
 
 ---
 
-## 1. Get registered
+## What you're about to do
 
-Ask the Knuckles operator to run:
+Three pieces:
 
-```bash
-python scripts/register_app_client.py \
-    --client-id <your-app-id> \
-    --app-name "<Your App Name>" \
-    --allowed-origin https://your-app.example.com \
-    --allowed-origin https://staging.your-app.example.com \
-    --allowed-origin http://localhost:3000
-```
+1. **Drive a sign-in ceremony.** Your app starts a sign-in flow,
+   sends the user through Google / Apple / passkey / magic-link, and
+   gets a `(access_token, refresh_token)` pair back from Knuckles.
+2. **Verify access tokens on every request.** Your app reads the
+   bearer token from each incoming request and checks it locally
+   against Knuckles' public key. No network call per request.
+3. **Refresh + log out.** When the access token expires, your app
+   trades the refresh token for a new pair. When the user logs out,
+   your app revokes the refresh token.
 
-Register **every origin** you'll ever pass as a `redirect_url` —
-production, staging, local-dev. Knuckles enforces that the redirect
-URL's origin matches one of these.
-
-The operator hands you a `client_id` and a `client_secret`. Store the
-secret in your **backend** environment. Never ship it in a browser
-bundle.
+That's the whole shape. Each language SDK packages all three.
 
 ---
 
-## 2. Pick an SDK
+## What's an "SDK"?
 
-| Stack | Package | Where it lives |
+If you've never seen the term: an **SDK** is "a library you install
+that wraps an API." Instead of writing curl-equivalents in your code,
+you call functions like `knuckles.google.start(...)` and the SDK
+handles the HTTP, the JSON shapes, the error codes, the JWT
+verification, and the JWKS caching.
+
+Knuckles ships two SDKs:
+
+| Stack | Package | Install |
 |---|---|---|
-| Python backend | `knuckles-client` | [`packages/knuckles-client-py/`](../packages/knuckles-client-py/) |
-| Node / TypeScript backend | `@knuckles/client` | [`packages/knuckles-client-ts/`](../packages/knuckles-client-ts/) |
-| Anything else | Hand-roll against [`docs/openapi.yaml`](./openapi.yaml) | — |
+| Python | `knuckles-client` | `pip install knuckles-client` |
+| Node / TypeScript | `@knuckles/client` | `npm install @knuckles/client` |
 
-The SDKs handle the three things you'd otherwise get wrong:
+Both are open source — sources at
+[`packages/knuckles-client-py/`](https://github.com/gsooter/knuckles/tree/main/packages/knuckles-client-py)
+and
+[`packages/knuckles-client-ts/`](https://github.com/gsooter/knuckles/tree/main/packages/knuckles-client-ts).
 
-1. **JWKS caching** — `verifyAccessToken` does no network call after
-   the first verify on a fresh process.
-2. **Refresh-token rotation** — every call returns a new refresh
-   token; you store the new one. The SDK doesn't hide this from you,
-   but it makes the contract obvious.
-3. **Error mapping** — typed exceptions per error code, so
-   `REFRESH_TOKEN_REUSED` is a class to catch, not a string to
-   match.
+If your backend is in something else (Go, Ruby, Rust, etc.), you
+can hand-roll a client against the [OpenAPI spec](api/) — it's a
+standard `application/json` REST API.
 
 ---
 
-## 3. Wire the four sign-in paths
+## The four sign-in methods, in shape
 
-All four flows produce the same `TokenPair` shape, so your post-sign-in
-code is identical regardless of method.
+All four ceremonies have the same shape: **start, then complete.**
 
-### Magic-link
+```
+                     YOUR APP                   KNUCKLES
+                     --------                   --------
 
-Frontend collects an email → backend calls
-`client.magic_link.start(email=..., redirect_url=".../auth/verify")`.
-Knuckles emails the user. The link points at your verify URL with
-`?token=<...>`. Your verify route calls
-`client.magic_link.verify(token)` and writes the resulting tokens into
-HTTP-only cookies (or whatever your session storage is).
+[user clicks Sign in with X]
+                     ──── start() ────────────►
+                     ◄──── { authorize_url } ──
 
-### Google / Apple
+[redirect user to authorize_url]
+[user is at provider — Google, Apple, etc.]
+[provider redirects user back to your callback]
 
-Frontend hits a backend route → backend calls
-`client.google.start(redirect_url="...")` and returns the
-`authorize_url` (or 302s the browser there). The provider redirects
-back to your callback URL with `code` + `state`. The backend calls
-`client.google.complete(code=..., state=...)` and writes the cookies.
+[your callback gets ?code=...&state=...]
+                     ──── complete(code,state) ►
+                     ◄──── { tokens } ─────────
 
-### WebAuthn passkey
-
-Sign-in: backend calls `client.passkey.sign_in_begin()` to get
-options, the frontend hands them to `navigator.credentials.get()`,
-posts the resulting credential back to the backend, which calls
-`client.passkey.sign_in_complete(credential=..., state=...)`.
-
-Registration (user is already signed in): backend calls
-`client.passkey.register_begin(access_token=...)`; frontend uses
-`navigator.credentials.create()`; backend calls
-`client.passkey.register_complete(...)`.
-
----
-
-## 4. Validate tokens on every API call
-
-```python
-# Python
-claims = knuckles.verify_access_token(token)
-user_id = claims["sub"]
+[store tokens in your session, user is signed in]
 ```
 
-```ts
-// TypeScript
-const claims = await knuckles.verifyAccessToken(token)
-const userId = claims.sub
-```
+Magic-link is slightly different: instead of redirecting through a
+provider, Knuckles emails the user a link. They click it, your
+callback gets `?token=...`, and you call
+`magic_link.verify(token)` instead of `complete(...)`.
 
-The SDK fetches Knuckles' JWKS once per process and verifies tokens
-locally — no network cost per request. See the
-[Express middleware example](../examples/express-middleware/middleware.ts)
-or the [Flask middleware example](../examples/python-flask/middleware.py)
-for the full pattern.
+Passkey sign-in skips the redirect entirely: the user's device does
+the cryptographic handshake right in the page, and your frontend
+posts the result to your backend, which calls `passkey.sign_in_complete(...)`.
 
 ---
 
-## 5. Handle the failure modes
+## The trust pattern: secret on the backend, token in the cookie
 
-| Exception | When it fires | What to do |
+Knuckles distinguishes two kinds of authentication:
+
+- **Client auth** = `X-Client-Id` + `X-Client-Secret` headers. Proves
+  *the app* is allowed to call Knuckles. **The secret never leaves
+  your backend.** All Knuckles calls go through your server, never
+  directly from the browser.
+- **Bearer auth** = `Authorization: Bearer <access-token>`. Proves
+  *the user* is signed in. The token is given to your frontend
+  inside an HTTP-only same-site cookie.
+
+When a request hits your backend with both, your backend reads:
+- *Which user?* from the bearer token (verify the JWT).
+- *Authorize the call to Knuckles?* with the client headers from your
+  env vars.
+
+Some endpoints (like `/v1/me`) need **both**.
+
+---
+
+## Where to verify tokens
+
+```
+[ user clicks something ]
+        ↓
+[ your backend gets a request with Authorization: Bearer ... ]
+        ↓
+[ your backend verifies the JWT locally    ← THIS IS NEW
+  using the cached public key from JWKS ]
+        ↓
+[ your backend serves the request, knowing it's Alice ]
+```
+
+**Locally** is the important word. Your backend fetches Knuckles'
+public key once on startup (or first request), caches it forever, and
+verifies signatures with that cached key. Verifying a token is just
+a few microseconds of CPU — no network involved.
+
+If Knuckles is down, your app keeps verifying tokens just fine. New
+sign-ins won't work, but existing sessions are unaffected.
+
+The SDK handles all of this in `verify_access_token()` /
+`verifyAccessToken()` — you don't have to write the JWKS fetching or
+caching yourself.
+
+---
+
+## Cookie storage 101
+
+You'll store two things in the browser:
+
+1. **Access token** (1h). Goes in an **HTTP-only**, **same-site**
+   cookie so your JavaScript can't read it (which means a malicious
+   script injected into your page also can't steal it).
+2. **Refresh token** (30d). **Don't put this in the browser.** Store
+   it server-side in your own session table, keyed by the access
+   token's `sub` or by your own session ID. The browser only ever
+   sees a session cookie that points at your server-side row.
+
+When the access token expires:
+- The browser sends the now-expired access token.
+- Your backend's middleware sees it's expired, looks up the
+  server-side refresh token, calls
+  `client.tokens.refresh(refresh_token=...)`, gets a new pair, sets
+  the new access token cookie, stores the new refresh token, and
+  retries the request.
+
+This is the **"silent refresh"** pattern. The user never sees an
+auth prompt — their session just keeps working.
+
+---
+
+## Error handling, in three buckets
+
+Every Knuckles error has a typed exception in the SDK:
+
+| What happened | Exception | What your app should do |
 |---|---|---|
-| `KnucklesAuthError` (`code="REFRESH_TOKEN_REUSED"`) | The refresh token was already used. **Every** refresh token for this user has been revoked. | Log the user out of every device; surface "you've been signed out for security." |
-| `KnucklesAuthError` (`code="REFRESH_TOKEN_EXPIRED"`) | Refresh token's 30d window elapsed. | Redirect to sign-in. |
-| `KnucklesTokenError` | Access-token signature/audience/issuer/expiry failed locally. | Try a refresh; if that also fails, sign out. |
-| `KnucklesRateLimitError` | Magic-link `start` hit the per-email throttle. | Show a friendly "try again in a few minutes" message. |
-| `KnucklesValidationError` | The SDK or the caller passed bad input. | Treat as a bug — should not reach end users. |
-| `KnucklesNetworkError` | Knuckles unreachable. | Retry with backoff; fail closed for protected resources. |
+| Refresh token was already used | `RefreshTokenReusedError` | Sign the user out everywhere. Surface "you've been signed out for security reasons." |
+| Refresh token's 30 days elapsed | `RefreshTokenExpiredError` | Send the user back to the sign-in page. |
+| Access token is invalid / expired | `TokenError` | Try a refresh. If that also fails, send to sign-in. |
+| User typed magic-link email too fast | `RateLimitError` | Show "try again in a minute." |
+| Bad input (caller's fault) | `ValidationError` | Treat as a bug. Don't surface to the user. |
+| Knuckles unreachable | `NetworkError` | Retry with backoff. Fail closed for protected resources. |
+
+The SDKs raise these with the same names and the same shape across
+Python and TypeScript.
 
 ---
 
-## 6. Reference examples
+## Pick your language
 
-* [`examples/nextjs-app/`](../examples/nextjs-app/) — Next.js (App
-  Router) sign-in page, Google + magic-link callbacks, server-side
-  `/me` route.
-* [`examples/express-middleware/`](../examples/express-middleware/) —
-  ~30 line Express middleware that validates Knuckles bearer tokens.
-* [`examples/python-flask/`](../examples/python-flask/) — Same shape
-  as the Express example, but for Flask.
+- 🐍 **[Python integration walkthrough](python.html)** — full
+  Flask example with route protection, sign-in callbacks, and
+  silent refresh.
+- 🟦 **[TypeScript integration walkthrough](typescript.html)** —
+  full Express / Next.js example with the same coverage.
+
+Both walkthroughs use the same pattern; pick whichever matches your
+stack.
 
 ---
 
-## 7. Get the OpenAPI spec
+## Reference examples
 
-For tooling that auto-generates clients, validates contracts, or
-renders docs UIs:
+If you'd rather read finished code than a walkthrough:
 
-[`docs/openapi.yaml`](./openapi.yaml) — OpenAPI 3.1, every public
-endpoint, every request/response shape, the full error-code
-vocabulary as an enum. Drop into Swagger UI / Redoc / Stoplight to
-get a hosted reference.
+* [`examples/nextjs-app/`](https://github.com/gsooter/knuckles/tree/main/examples/nextjs-app) —
+  Next.js (App Router) sign-in page, Google + magic-link callbacks,
+  server-side `/me` route.
+* [`examples/express-middleware/`](https://github.com/gsooter/knuckles/tree/main/examples/express-middleware) —
+  Express middleware that validates Knuckles bearer tokens, ~30 lines.
+* [`examples/python-flask/`](https://github.com/gsooter/knuckles/tree/main/examples/python-flask) —
+  Same shape as the Express example, for Flask.
+
+---
+
+## Hand-rolling a client (no SDK)
+
+If your backend is in a language without a Knuckles SDK, you can
+talk to the HTTP API directly. You'll want to implement:
+
+1. **JWKS fetching + caching.** GET
+   `/.well-known/jwks.json`, cache it for an hour or so, refresh on
+   `kid` mismatch.
+2. **JWT verification.** Use any RS256-capable JWT library. Verify
+   `iss` matches your Knuckles base URL, `aud` matches your
+   `client_id`, `exp` is in the future.
+3. **The seven endpoints you actually need:** `magic-link/start`,
+   `magic-link/verify`, `google/start`, `google/complete`,
+   `apple/start`, `apple/complete`, `token/refresh`. (Add the
+   passkey four if you want passkeys.)
+
+The full schema is in [`docs/openapi.yaml`](api/) — drop it into
+[Swagger Editor](https://editor.swagger.io) or generate a client with
+[`openapi-generator`](https://openapi-generator.tech).

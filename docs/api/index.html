@@ -51,26 +51,19 @@
     <header>
       <h1>Knuckles · API Reference</h1>
       <nav>
+        <a href="../">← Docs home</a>
         <a href="https://github.com/gsooter/knuckles">GitHub</a>
         <a href="https://pypi.org/project/knuckles-client/">Python SDK</a>
-        <a
-          href="https://github.com/gsooter/knuckles/blob/main/docs/INTEGRATION.md"
-          >Integration Guide</a
-        >
-        <a
-          href="https://github.com/gsooter/knuckles/blob/main/docs/ONBOARDING.md"
-          >Onboarding</a
-        >
       </nav>
     </header>
     <main>
       <!--
-        Redoc renders the OpenAPI spec from this same docs/ directory.
+        Redoc renders the OpenAPI spec from the parent docs/ directory.
         It's a single self-contained <script> — no build pipeline.
         Update the spec at docs/openapi.yaml and the rendered reference
         updates on the next page load.
       -->
-      <redoc spec-url="./openapi.yaml" hide-loading></redoc>
+      <redoc spec-url="../openapi.yaml" hide-loading></redoc>
       <script
         src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"
         defer
