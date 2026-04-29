@@ -6,6 +6,9 @@ default_stages: [pre-commit]
 repos:
   - repo: local
     hooks:
+      # Format + lint every changed Python file. Black + ruff are smart
+      # enough to find the right config (main repo or SDK package) by
+      # walking up to the closest pyproject.toml.
       - id: black
         name: black
         entry: .venv/bin/black --check --force-exclude 'knuckles/migrations/'
@@ -20,17 +23,35 @@ repos:
         types: [python]
         pass_filenames: true
 
-      - id: mypy
-        name: mypy
+      # Mypy and pytest run at pre-push since they're slower than the
+      # per-file format/lint pass and want the whole package context.
+      - id: mypy-service
+        name: mypy (service)
         entry: .venv/bin/mypy knuckles
         language: system
         types: [python]
         pass_filenames: false
         stages: [pre-push]
 
-      - id: pytest
-        name: pytest
+      - id: mypy-sdk
+        name: mypy (Python SDK)
+        entry: .venv/bin/mypy packages/knuckles-client-py/src
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest-service
+        name: pytest (service)
         entry: .venv/bin/pytest --cov=knuckles --cov-fail-under=80 -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: pytest-sdk
+        name: pytest (Python SDK)
+        entry: .venv/bin/pytest packages/knuckles-client-py/tests/ -q
         language: system
         types: [python]
         pass_filenames: false

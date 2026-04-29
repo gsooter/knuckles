@@ -18,3 +18,11 @@ build/
 .DS_Store
 .vscode/
 .idea/
+
+# TypeScript SDK build output
+packages/knuckles-client-ts/dist/
+packages/knuckles-client-ts/node_modules/
+*.tsbuildinfo
+
+# npm pack artifacts
+*.tgz
