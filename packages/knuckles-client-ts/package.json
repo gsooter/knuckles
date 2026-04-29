@@ -1,0 +1,66 @@
+{
+  "name": "@knuckles/client",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the Knuckles identity service",
+  "keywords": [
+    "authentication",
+    "auth",
+    "identity",
+    "jwt",
+    "oauth",
+    "webauthn",
+    "passkey",
+    "magic-link",
+    "knuckles",
+    "sdk"
+  ],
+  "homepage": "https://gsooter.github.io/knuckles/",
+  "bugs": {
+    "url": "https://github.com/gsooter/knuckles/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gsooter/knuckles.git",
+    "directory": "packages/knuckles-client-ts"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Garrett Sooter",
+    "email": "garrett.sooter@gmail.com"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run clean && npm run typecheck && npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "jose": "^5.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
