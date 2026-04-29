@@ -177,54 +177,266 @@ instead of being emailed (great for local dev).
 
 ### 3.2 Sign in with Google
 
-1. Go to [console.cloud.google.com](https://console.cloud.google.com).
-2. Create a project (or pick one you already have).
-3. Navigate to **APIs & Services → Credentials**.
-4. Click **Create Credentials → OAuth client ID**.
-5. Pick **Web application**.
-6. Under **Authorized redirect URIs**, add **every place** your app
-   will receive the Google callback. For most setups that's:
-   - `http://localhost:3000/auth/google/callback` (local dev)
+You'll create a **Google Cloud project**, configure an **OAuth
+consent screen**, and create an **OAuth client ID**. Plan ~15
+minutes if it's your first time. Free, no card required.
+
+#### Step 1 — Create a Google Cloud project
+
+1. Open <https://console.cloud.google.com>. Sign in with the Google
+   account you want to own this project (it can be your personal
+   account; Workspace is not required).
+2. In the **top-left**, click the **project picker** (it currently
+   shows "Select a project" or the name of an existing project).
+3. In the modal, click **New Project** (top right).
+4. Name it whatever you like (e.g. "My App Auth"). Leave organization
+   as "No organization" if you don't have a Workspace. Click
+   **Create**.
+5. Wait ~10 seconds for the project to provision, then make sure it's
+   selected in the project picker (top-left should now show your
+   project name).
+
+#### Step 2 — Configure the OAuth consent screen
+
+This is the screen Google shows users *during* sign-in ("My App wants
+to access your name and email"). You **must** configure it before
+you can create credentials.
+
+1. In the left sidebar, navigate to **APIs & Services → OAuth consent
+   screen**. (If you don't see "APIs & Services", click the hamburger
+   menu **☰** in the top left.)
+2. Pick a **User Type:**
+   - **External** — anyone with a Google account can sign in. Pick
+     this. (Internal is only available if you have a Google Workspace
+     organization.)
+3. Click **Create**.
+4. Fill in **OAuth consent screen** fields:
+   - **App name:** what users see during sign-in (e.g. "My App").
+   - **User support email:** your email.
+   - **App logo:** optional.
+   - **Application home page** / **privacy policy** / **terms of
+     service:** optional during testing, **required before
+     publishing**.
+   - **Authorized domains:** add the bare domains you'll redirect
+     from (e.g. `your-app.com`). For localhost-only dev, leave empty
+     — Google allows `localhost` automatically.
+   - **Developer contact:** your email again.
+   - Click **Save and Continue**.
+5. **Scopes** screen: click **Add or Remove Scopes** and add three:
+   - `.../auth/userinfo.email`
+   - `.../auth/userinfo.profile`
+   - `openid`
+   - Click **Update**, then **Save and Continue**.
+6. **Test users** screen: while your app is in "Testing" mode (the
+   default), only emails listed here can sign in. Add your own email
+   plus any teammates. Click **Save and Continue**.
+7. **Summary** screen: review and click **Back to Dashboard**.
+
+{: .note }
+**Testing vs. Production:** Your app starts in "Testing" status —
+limited to 100 test users you've explicitly added. To let any Google
+user sign in, click **Publish App** on the consent screen page. For
+basic scopes (email, profile, openid) publishing is instant and does
+not require Google verification. For sensitive scopes (Drive, Gmail,
+etc.) it requires manual review by Google — but Knuckles only uses
+the basic scopes, so publishing is one click.
+
+#### Step 3 — Create the OAuth client
+
+1. Sidebar: **APIs & Services → Credentials**.
+2. Click **+ Create Credentials** (top of page) → **OAuth client ID**.
+3. **Application type:** select **Web application**.
+4. **Name:** internal label only (e.g. "My App – Web"). Users never
+   see this.
+5. **Authorized JavaScript origins:** leave blank. Knuckles doesn't
+   need them — all calls go server-to-server.
+6. **Authorized redirect URIs:** click **+ Add URI** for each place
+   your app will receive Google's callback. **Add every environment
+   you have:**
+   - `http://localhost:3000/auth/google/callback` (local dev — http
+     is allowed for localhost)
    - `https://staging.your-app.com/auth/google/callback`
    - `https://your-app.com/auth/google/callback`
-7. Save. Google shows you a Client ID and a Client Secret.
-8. Set:
-   ```
-   GOOGLE_OAUTH_CLIENT_ID=xxxxxxxxxxxx.apps.googleusercontent.com
-   GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-xxxxxxxxx
-   ```
+7. Click **Create**.
+
+A modal pops up with your **Client ID** and **Client Secret.**
+**Copy both right now** — you'll see the Client ID again later, but
+copying both is convenient. Click **OK**.
+
+#### Step 4 — Set the env vars
+
+```
+GOOGLE_OAUTH_CLIENT_ID=xxxxxxxxxxxx.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=GOCSPX-xxxxxxxxx
+```
 
 {: .note }
 **The redirect URI goes on YOUR app, not on Knuckles.** Knuckles
 hands the user back to your app, your app forwards the result to
 Knuckles. You'll see why in the [Integration guide](INTEGRATION.html).
 
+#### Common Google errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `redirect_uri_mismatch` | The `redirect_url` you sent to Knuckles doesn't exactly match what's listed in the OAuth client. | Check trailing slashes (`/auth/google/callback` ≠ `/auth/google/callback/`), http vs https, port numbers, the host. Add the exact string to **Authorized redirect URIs** and wait ~5 minutes for Google to propagate. |
+| `invalid_client` | Wrong Client ID, wrong Client Secret, or the credential was deleted. | Re-copy from the Credentials page. The Client Secret is masked — click **Reset Client Secret** if you've lost it. |
+| `access_denied` (user-facing) | Your app is in "Testing" status and the user's email isn't in the test-users list. | Add their email under **OAuth consent screen → Test users**, OR click **Publish App**. |
+| `disallowed_useragent` | Some embedded browsers (Facebook in-app browser, old WebViews) are blocked by Google. | Open the sign-in flow in the system browser, not the in-app one. |
+| Sign-in works in dev but breaks in prod | Production redirect URI not added to the OAuth client. | Add `https://your-app.com/auth/google/callback` and wait ~5 min. |
+
 ### 3.3 Sign in with Apple
 
-Apple is more involved. You need an Apple Developer account ($99/yr).
+Sign in with Apple is the most painful provider to set up. Plan
+**~30–45 minutes** the first time. Two reasons it's harder than
+Google:
 
-1. In your Apple Developer account, register an **App ID** with
-   "Sign In with Apple" capability enabled.
-2. Register a **Services ID** (this becomes your `client_id`).
-3. Add your callback URLs to the Services ID:
-   - `https://your-app.com/auth/apple/callback`
-   - (etc. for staging / dev)
-4. Create a **Sign in with Apple key** — Apple gives you a `.p8` file
-   to download. Note the **Key ID** and your **Team ID** from the
-   developer portal.
-5. Set:
-   ```
-   APPLE_OAUTH_CLIENT_ID=com.your-app.signin     # the Services ID
-   APPLE_OAUTH_TEAM_ID=ABCDE12345
-   APPLE_OAUTH_KEY_ID=XYZ123ABC4
-   APPLE_OAUTH_PRIVATE_KEY=$(cat AuthKey_XYZ123ABC4.p8)
-   ```
+1. **It costs money.** Apple Developer Program is $99/year. No free
+   tier. You need a paid membership before you can configure
+   anything below.
+2. **Multiple distinct concepts.** You'll juggle four things —
+   **Team ID**, **App ID**, **Services ID**, and a **Sign in with
+   Apple key** — that all live in different places and refer to each
+   other in non-obvious ways. Don't worry, the steps below are in
+   the right order.
 
 {: .warning }
-Apple's redirect URLs **must be HTTPS** — they don't accept
-`http://localhost`. If you want to test locally, use a tunnel like
-[ngrok](https://ngrok.com) and add the tunnel URL to the Services
-ID.
+**Apple does not allow `http://localhost` redirect URIs.** Even for
+local dev. Either skip Apple while developing locally and only test
+in staging, or use a tunnel like [ngrok](https://ngrok.com) (free
+tier is fine) so you have an HTTPS URL pointed at your dev machine,
+and add that tunnel URL to the Services ID.
+
+#### Step 0 — Make sure you're enrolled
+
+If you haven't already, enroll at
+<https://developer.apple.com/programs/enroll/>. Individual enrollment
+takes a day or two for Apple to verify; organization enrollment can
+take up to a week. **Skip the rest of this section until you're
+enrolled** — none of the screens below are accessible otherwise.
+
+#### Step 1 — Find your Team ID (you already have one)
+
+1. Sign in at <https://developer.apple.com/account>.
+2. Look at the **top-right corner** under your name. You'll see a
+   10-character alphanumeric string like `ABCDE12345`. **That's your
+   Team ID.** Copy it down.
+
+You'll also see it under **Membership Details** in the left sidebar
+if you can't find it elsewhere.
+
+#### Step 2 — Create an App ID
+
+This represents the underlying "app" entity at Apple, even though
+yours might be a web app. You need it before the Services ID will
+work.
+
+1. Go to <https://developer.apple.com/account/resources/identifiers/list>.
+   (Or sidebar: **Certificates, Identifiers & Profiles → Identifiers**.)
+2. Click the **blue + button** next to "Identifiers" at the top.
+3. Select **App IDs** → click **Continue**.
+4. Select **App** → click **Continue**.
+5. Fill in:
+   - **Description:** internal label (e.g. "My App"). Users never
+     see this.
+   - **Bundle ID:** select **Explicit** and enter a reverse-domain
+     identifier like `com.your-app`. This is permanent — pick
+     carefully.
+6. Scroll the **Capabilities** list, find **Sign In with Apple**, and
+   **check the box.** (Click **Edit** next to it if you want a
+   non-default config; the default is fine for most apps.)
+7. Click **Continue** → review → click **Register**.
+
+#### Step 3 — Create a Services ID (this becomes your `client_id`)
+
+A Services ID represents the *web-side* identity. The bundle ID
+above is for native apps; the Services ID is what Knuckles uses.
+
+1. Back to **Identifiers**, click the **blue + button** again.
+2. Select **Services IDs** → click **Continue**.
+3. Fill in:
+   - **Description:** internal label (e.g. "My App Sign In").
+   - **Identifier:** another reverse-domain string like
+     `com.your-app.signin`. This will be your
+     `APPLE_OAUTH_CLIENT_ID` env var. Different from the App ID
+     above. Permanent.
+4. Click **Continue** → **Register**.
+5. Now click on the Services ID you just created from the list to
+   open its settings.
+6. Check **Sign In with Apple** to enable it.
+7. Click the **Configure** button next to "Sign In with Apple."
+8. In the modal:
+   - **Primary App ID:** select the App ID you made in Step 2.
+   - **Domains and Subdomains:** add the bare hostnames where your
+     callback URLs will live, *without* `https://` and *without*
+     paths. E.g. `your-app.com`, `staging.your-app.com`,
+     `tunnel-abc123.ngrok-free.app`.
+   - **Return URLs:** add the **full callback URLs**, including
+     `https://` and the path. E.g.
+     `https://your-app.com/auth/apple/callback`.
+   - Click **Next** → **Done**.
+9. Click **Continue** → **Save**.
+
+{: .note }
+**Domain verification.** Apple requires you serve a verification
+file at `https://your-domain.com/.well-known/apple-developer-domain-association.txt`.
+After saving the Services ID, you'll see a **Download** button on the
+domains modal. Download that file, drop it at that exact path on
+your web server, then click **Verify** in the Apple modal. Repeat
+for each domain. Verification often takes a few minutes to propagate.
+
+#### Step 4 — Create a Sign in with Apple key (`.p8` file)
+
+This is the **private key** Apple uses to confirm your server's
+identity. You can only download it ONCE.
+
+1. Sidebar: **Certificates, Identifiers & Profiles → Keys.**
+2. Click the **blue + button** next to "Keys."
+3. **Key Name:** internal label (e.g. "My App – Sign In Key").
+4. Check **Sign In with Apple.**
+5. Click **Configure** next to it. **Primary App ID:** select the
+   App ID from Step 2. Click **Save.**
+6. Click **Continue** → review → click **Register**.
+7. **Download the `.p8` file NOW.** This is your only chance —
+   Apple never lets you download it again. Store it somewhere safe
+   (1Password, your secrets manager, encrypted disk).
+8. Note the **Key ID** shown on this page (10 characters,
+   alphanumeric, e.g. `XYZ123ABC4`). Copy it.
+
+#### Step 5 — Set the env vars
+
+```bash
+APPLE_OAUTH_CLIENT_ID=com.your-app.signin       # the Services ID identifier
+APPLE_OAUTH_TEAM_ID=ABCDE12345                  # from Step 1
+APPLE_OAUTH_KEY_ID=XYZ123ABC4                   # from Step 4
+APPLE_OAUTH_PRIVATE_KEY=$(cat AuthKey_XYZ123ABC4.p8)
+```
+
+The `APPLE_OAUTH_PRIVATE_KEY` value is the **literal contents of the
+`.p8` file**, including the `-----BEGIN PRIVATE KEY-----` and
+`-----END PRIVATE KEY-----` lines. The `$(cat ...)` shell expansion
+above does this for you when you set the env var locally; for
+production deploys, copy-paste the file's text into your platform's
+secrets manager.
+
+{: .important }
+**Apple's `client_secret` is a JWT that expires every 6 months.**
+Knuckles auto-mints this client_secret JWT internally on every
+request, signed with your `.p8` key. So as long as your `.p8` key
+itself isn't revoked, you don't have to rotate `client_secret`s by
+hand. (This is different from Google, where the Client Secret is a
+permanent string until you reset it.)
+
+#### Common Apple errors
+
+| Error | Cause | Fix |
+|---|---|---|
+| `invalid_client` (during `/v1/auth/apple/complete`) | One of `APPLE_OAUTH_CLIENT_ID`, `TEAM_ID`, or `KEY_ID` doesn't match the `.p8` key file you uploaded. | Re-check all three values against the Apple Developer portal — they're in three different places (Services ID page, top-right of any page, Keys page respectively). |
+| `invalid_grant` (after time passes) | Apple's auth code expired, or the client_secret JWT Knuckles minted has clock skew. | Make sure the Knuckles host's clock is correct. If it's been weeks, your .p8 key may have been revoked — check **Keys** page in the developer portal. |
+| Domain verification keeps failing | The `.well-known/apple-developer-domain-association.txt` file isn't being served correctly. | The file must be at *exactly* that path, served as `text/plain`, with the exact contents Apple gave you (no BOM, no extra whitespace). Some platforms (Vercel, Netlify) need explicit routing rules to allow `.well-known/`. |
+| Apple sign-in works the first time but fails on subsequent attempts with no `user` payload | This is by design — Apple sends the user's name only on the FIRST EVER sign-in for a given Apple ID. | Don't depend on `user` being present. If it's there, save it; if it's not, fall back to whatever you have. Knuckles handles this correctly internally. |
+| User sees "Email Sharing Preference" with a relay address like `abc123@privaterelay.appleid.com` | Apple lets users hide their real email and use a relay. | Treat the relay address as the canonical email. It's stable across sign-ins. Apple forwards email sent to it. |
+| Sign-in works in dev but not in prod | Production return URL not added to the Services ID, or the production domain isn't verified. | Add the prod URL under **Sign In with Apple → Configure → Return URLs**, and make sure the prod domain is verified (download + serve the verification file there too). |
 
 ### 3.4 Passkeys (WebAuthn)
 

@@ -140,3 +140,24 @@ of one piece of that picture.
 - **Already have Knuckles running, just need to wire up an app.** →
   [Integration](INTEGRATION.html).
 - **Something's broken.** → [FAQ](faq.html).
+
+---
+
+## Roadmap
+
+Today Knuckles is a **self-hosted service** — you deploy it
+separately and your apps talk to it over HTTP. That's the right
+shape for shops with multiple apps, isolation requirements, or a
+non-Python backend.
+
+**Library mode** — `pip install knuckles` and three lines of code
+in your existing Flask app — is the next planned milestone. It will
+target the same niche the [Lucia](https://lucia-auth.com/) library
+fills for TypeScript: drop-in modern auth (passkeys + OAuth +
+magic-link) with no separate infrastructure to deploy. See
+[`DECISIONS.md`](https://github.com/gsooter/knuckles/blob/main/DECISIONS.md)
+for the architectural trade-offs and why this is a future change,
+not a current one.
+
+The HTTP API and SDK shape will remain stable — apps integrating
+today will keep working unchanged when library mode lands.

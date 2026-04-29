@@ -636,3 +636,118 @@ in the same change.
 - The TypeScript SDK targets Node 18+ (native ``fetch``, ``jose`` for
   JWKS). It runs unchanged in browsers but must not — the
   ``client_secret`` must stay server-side.
+
+### 016 — Library Mode Is Roadmap, Not Current State
+
+**Status:** Accepted (planned, not implemented)
+
+**Decision:**
+The first shipping release of Knuckles is **service mode only** — a
+self-hosted Flask service with a separate database, called over HTTP
+by consuming apps via the ``knuckles-client`` SDK. A planned future
+release will add **library mode**: a ``pip install knuckles`` Flask
+extension (``Knuckles(app, db)``) that registers auth routes onto a
+host app and stores its tables (``knuckles_users`` etc.) in the
+host's database.
+
+**The HTTP API and SDK shape stay frozen across this transition.**
+Apps integrating today (Greenroom is the first) will keep working
+unchanged when library mode lands.
+
+**Rationale:**
+The market for new hosted-SaaS auth providers is crowded
+(Auth0/Clerk/Stytch/WorkOS are heavily VC-funded; Supabase Auth and
+Clerk's free tier cover indie devs). The market for a **modern,
+passwordless-first, drop-in auth library for Python** is genuinely
+underserved — Flask-Login is password-shaped, Authlib requires
+hand-wiring every provider, python-social-auth is dated. The closest
+TypeScript analog is `Lucia <https://lucia-auth.com/>`_ /
+`Better-Auth <https://better-auth.com/>`_, both well-loved and
+free-forever libraries.
+
+The library-mode play is the right shape for adoption-as-influence
+because:
+
+- Distribution cost is zero — PyPI, no hosting fees.
+- Adoption surface is large — every Python web app is a potential
+  user.
+- The path from Greenroom-as-reference-deployment to library-mode is
+  additive; current users don't break.
+- Future monetization stays open via brand/trademark + a separate
+  ``knuckles-enterprise`` package or a hosted offering, decided on
+  evidence (observed adoption, inbound interest) rather than now.
+
+**Why this is deferred, not done:**
+Library mode is a real refactor (~3–4 days of focused work) that
+touches ``knuckles/app.py``, ``knuckles/core/database.py``,
+``knuckles/core/config.py``, the Alembic migration story (table
+prefix), and the entire docs site. Doing it well requires the
+maintainer to not be in the middle of shipping a different product.
+At the time this decision was recorded, the maintainer's primary
+focus is shipping Greenroom; pulling on library mode now would delay
+that. Service mode is a complete, secure, deployed system — it is
+not a stopgap, it is one of two supported architectures.
+
+**Alternatives considered:**
+
+- **Hosted SaaS pivot** — rejected for now. The TAM exists but the
+  buildout (signup, billing, dashboards, support, SOC 2) is months
+  of work for unvalidated demand. The maintainer is a builder, not
+  a SaaS founder. Preserves optionality: today's service-mode
+  architecture is the right primitive to grow into a hosted product
+  later if signal appears.
+- **Open-core (OSS library + paid hosted tier from day one)** —
+  rejected for now. Doubles the work surface (two products to
+  maintain) before either has traction. Revisit once library mode
+  ships and there is observed demand for hosting.
+- **Drop service mode entirely once library mode ships** — rejected.
+  Service mode genuinely fits multi-app shops and non-Python
+  backends. Both architectures are first-class going forward.
+
+**Implementation plan (when work resumes):**
+
+The refactor is sequenceable into independently shippable phases so
+work can pause cleanly between any two:
+
+1. **Decouple package from app/db ownership** — split
+   ``knuckles/app.py`` into ``create_app()`` (service mode, current
+   behavior unchanged) and ``_register(app, get_session, config)``
+   (library primitive). Make ``Settings`` constructible from a dict.
+   Add ``knuckles/extension.py`` defining
+   ``Knuckles(app, db, config)``.
+2. **Public model exports** — ``knuckles/models.py`` re-exports
+   ``User``, ``RefreshToken``, ``AppClient``, ``Passkey``,
+   ``MagicLinkToken``, ``UserOAuthProvider`` so library callers can
+   query via their own session.
+3. **Table prefix + migrations** — all tables prefixed
+   ``knuckles_`` (configurable via ``Knuckles(app, db, prefix=...)``).
+   Alembic migration handles the rename for the existing
+   service-mode deployment. New ``flask knuckles upgrade`` CLI.
+4. **Helpers** — ``knuckles.verify_access_token``,
+   ``knuckles.require_signed_in`` decorator,
+   ``knuckles.current_user`` proxy. Mirrors the SDK surface
+   in-process.
+5. **PyPI release** as ``knuckles`` (claim the name when ready;
+   fallback ``knuckles-flask`` if taken).
+6. **Docs rewrite** — library mode becomes the default Quickstart;
+   service mode moves to a "multi-app / advanced" page.
+
+**Consequences:**
+
+- The current docs at ``docs/`` describe service mode (with a
+  roadmap pointer to this decision). Apple/Google/Resend setup
+  walkthroughs in ``docs/ONBOARDING.md`` are valid for both modes —
+  the env vars and provider configs don't change between
+  architectures.
+- The repo structure already accommodates both modes: ``knuckles/``
+  is the importable package source today, and
+  ``packages/knuckles-client-py/`` is an independent release
+  schedule for the HTTP SDK.
+- Greenroom keeps using service mode + ``knuckles-client``. Its
+  integration is stable, will not break when library mode lands,
+  and migrating Greenroom to library mode is optional, separately
+  scheduled work.
+- The brand name "Knuckles" and the GitHub repo are commercially
+  valuable independent of the code license. MIT-licensing the code
+  preserves adoption optionality without giving away the option to
+  build a paid offering later.
