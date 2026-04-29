@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     webauthn_rp_name: str = "Knuckles"
     webauthn_origin: str = "http://localhost:3000"
 
+    # CORS
+    # When ``False`` (default), Knuckles emits ``Access-Control-Allow-Origin: *``
+    # — safe in practice because consuming apps proxy from their backend and
+    # never embed the client secret in a browser. Flip to ``True`` to restrict
+    # CORS to the union of every registered ``app_clients.allowed_origins``,
+    # echoing the request's ``Origin`` only when it matches.
+    knuckles_strict_cors: bool = False
+
 
 def get_settings() -> Settings:
     """Create and return a validated ``Settings`` instance.

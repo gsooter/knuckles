@@ -396,6 +396,41 @@ def delete_passkey(session: Session, cred: PasskeyCredential) -> None:
     session.flush()
 
 
+def delete_passkey_for_user(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    credential_id: str,
+) -> bool:
+    """Delete a passkey credential row, scoped to its owning user.
+
+    The ``user_id`` filter is load-bearing — it makes it impossible
+    for a request authenticated as user A to delete user B's
+    credential by guessing or capturing its id.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user the credential must belong to.
+        credential_id: Base64url-encoded credential id of the row to
+            delete.
+
+    Returns:
+        ``True`` if a row was deleted, ``False`` if no matching row
+        existed for this user (the caller decides whether to surface
+        a 404).
+    """
+    stmt = select(PasskeyCredential).where(
+        PasskeyCredential.user_id == user_id,
+        PasskeyCredential.credential_id == credential_id,
+    )
+    cred = session.execute(stmt).scalar_one_or_none()
+    if cred is None:
+        return False
+    session.delete(cred)
+    session.flush()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # App clients
 # ---------------------------------------------------------------------------

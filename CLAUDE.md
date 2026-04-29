@@ -144,22 +144,33 @@ absence of those files is load-bearing — see the Hard Rule.
 
 ## API Surface (the complete list)
 
-- `GET /health`
-- `GET /.well-known/jwks.json`
-- `POST /v1/auth/magic-link/request`
-- `POST /v1/auth/magic-link/verify`
-- `GET  /v1/auth/google`
-- `GET  /v1/auth/google/callback`
-- `GET  /v1/auth/apple`
-- `POST /v1/auth/apple/callback`
-- `POST /v1/auth/passkey/register/begin`
-- `POST /v1/auth/passkey/register/complete`
-- `POST /v1/auth/passkey/auth/begin`
-- `POST /v1/auth/passkey/auth/complete`
-- `POST /v1/auth/token/refresh`
-- `POST /v1/auth/logout`
-- `GET  /v1/auth/me`
-- `GET  /v1/auth/jwks`  *(alias of `/.well-known/jwks.json`; both stay supported for discovery convenience)*
+Every consuming-app call uses `X-Client-Id` + `X-Client-Secret`
+headers (the **client** column below). User-context calls additionally
+need `Authorization: Bearer <access_token>` (the **bearer** column).
+
+- `GET  /health` — no auth
+- `GET  /.well-known/jwks.json` — no auth
+- `GET  /.well-known/openid-configuration` — no auth (OIDC discovery)
+- `GET  /v1/auth/jwks` — no auth (alias of `/.well-known/jwks.json`)
+- `POST /v1/auth/magic-link/start` — client
+- `POST /v1/auth/magic-link/verify` — client
+- `POST /v1/auth/google/start` — client
+- `POST /v1/auth/google/complete` — client
+- `POST /v1/auth/apple/start` — client
+- `POST /v1/auth/apple/complete` — client
+- `POST /v1/auth/passkey/register/begin` — bearer
+- `POST /v1/auth/passkey/register/complete` — bearer
+- `POST /v1/auth/passkey/sign-in/begin` — client
+- `POST /v1/auth/passkey/sign-in/complete` — client
+- `GET  /v1/auth/passkey` — bearer (list current user's passkeys)
+- `DELETE /v1/auth/passkey/<credential_id>` — bearer (delete one)
+- `POST /v1/token/refresh` — client
+- `POST /v1/logout` — client (revokes the presented refresh token)
+- `POST /v1/logout/all` — client + bearer (revokes every refresh token for the user)
+- `GET  /v1/me` — client + bearer
+
+(The expired-magic-link cleanup is `scripts/cleanup_magic_links.py`,
+not an HTTP endpoint, so the admin attack surface stays at zero.)
 
 Adding a route outside this list requires an entry in `DECISIONS.md`.
 

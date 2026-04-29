@@ -23,8 +23,13 @@ from flask.wrappers import Response
 
 from knuckles.api.v1 import api_v1
 from knuckles.core import database
-from knuckles.core.app_client_auth import get_current_app_client, require_app_client
-from knuckles.core.exceptions import ValidationError
+from knuckles.core.app_client_auth import (
+    assert_redirect_allowed,
+    get_current_app_client,
+    require_app_client,
+)
+from knuckles.core.exceptions import RATE_LIMITED, AppError, ValidationError
+from knuckles.core.rate_limit import magic_link_limiter
 from knuckles.services import magic_link
 from knuckles.services.email import get_default_sender
 
@@ -66,8 +71,20 @@ def start_magic_link_route() -> tuple[Response, int]:
     email = _require_string_field("email")
     redirect_url = _require_string_field("redirect_url")
     app_client = get_current_app_client()
-    session = database.get_db()
+    assert_redirect_allowed(app_client, redirect_url)
 
+    # Per-email throttle: prevent loops that would weaponize Knuckles
+    # into an email bomb against a victim's address. Key is scoped per
+    # app-client so two apps' send budgets don't collide.
+    bucket_key = f"{app_client.client_id}:{email.lower()}"
+    if not magic_link_limiter.allow(bucket_key):
+        raise AppError(
+            code=RATE_LIMITED,
+            message="Too many magic-link requests for this email. Try again later.",
+            status_code=429,
+        )
+
+    session = database.get_db()
     magic_link.start_magic_link(
         session,
         email=email,

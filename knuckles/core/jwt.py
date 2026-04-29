@@ -185,25 +185,57 @@ def _int_to_base64url(value: int) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def get_jwks() -> dict[str, list[dict[str, str]]]:
-    """Return the JWKS document consuming apps use to validate tokens.
+def _public_key_to_jwk(*, kid: str, public_key: rsa.RSAPublicKey) -> dict[str, str]:
+    """Render an RSA public key as a JWK entry.
 
-    The document contains the Knuckles public key in JWK form with its
-    stable ``kid``. Adding a new key (for rotation) is an append-only
-    change to this function plus a config update.
+    Args:
+        kid: Stable key identifier published alongside the key.
+        public_key: The RSA public key to serialize.
 
     Returns:
-        A dict of the shape ``{"keys": [...]}``. Each key entry
-        includes ``kty``, ``use``, ``alg``, ``kid``, ``n``, and ``e``.
+        A JWK dict with ``kty``, ``use``, ``alg``, ``kid``, ``n``, ``e``.
     """
-    settings = get_settings()
-    public_numbers = get_public_key().public_numbers()
-    jwk: dict[str, str] = {
+    public_numbers = public_key.public_numbers()
+    return {
         "kty": "RSA",
         "use": "sig",
         "alg": _ALGORITHM,
-        "kid": settings.knuckles_jwt_key_id,
+        "kid": kid,
         "n": _int_to_base64url(public_numbers.n),
         "e": _int_to_base64url(public_numbers.e),
     }
-    return {"keys": [jwk]}
+
+
+def get_published_public_keys() -> list[tuple[str, rsa.RSAPublicKey]]:
+    """Return every (kid, public key) pair the JWKS should publish.
+
+    Today this is just the active signing key. During a rotation the
+    list will include both the new and the previous key for the
+    ``KNUCKLES_ACCESS_TOKEN_TTL_SECONDS`` window so consuming apps can
+    validate tokens minted under either ``kid``. Wiring an additional
+    key is a one-line append to this function plus an env var.
+
+    Returns:
+        A list of ``(kid, public_key)`` pairs, freshest first.
+    """
+    settings = get_settings()
+    return [(settings.knuckles_jwt_key_id, get_public_key())]
+
+
+def get_jwks() -> dict[str, list[dict[str, str]]]:
+    """Return the JWKS document consuming apps use to validate tokens.
+
+    The document contains every currently-trusted Knuckles public key
+    in JWK form. During key rotation the list grows to two entries
+    (new + previous) until tokens minted under the previous key have
+    expired.
+
+    Returns:
+        A dict of the shape ``{"keys": [...]}``.
+    """
+    return {
+        "keys": [
+            _public_key_to_jwk(kid=kid, public_key=key)
+            for kid, key in get_published_public_keys()
+        ]
+    }

@@ -107,6 +107,26 @@ def logout_route() -> tuple[Response, int]:
     return jsonify({}), 204
 
 
+@api_v1.post("/logout/all")
+@require_app_client
+@require_auth
+def logout_all_route() -> tuple[Response, int]:
+    """Revoke every active refresh token for the authenticated user.
+
+    Useful for "sign out of all devices" UI and for users responding
+    to a suspected credential leak. Requires both client headers (so
+    we know who is calling) and a bearer access token (so we know
+    which user to revoke).
+
+    Returns:
+        Tuple of JSON body carrying the revoked count and HTTP 200.
+    """
+    user_id = get_current_user_id()
+    session = database.get_db()
+    revoked = repo.revoke_all_refresh_tokens_for_user(session, user_id)
+    return jsonify({"data": {"revoked": revoked}}), 200
+
+
 @api_v1.get("/me")
 @require_app_client
 @require_auth

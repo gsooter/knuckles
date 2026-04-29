@@ -470,3 +470,169 @@ no out-of-band migration runner.
 - Long-running migrations in the future will need a separate
   release-phase container or pre-deploy migration script. Revisit
   this decision when a single migration crosses ~10 seconds.
+
+---
+
+### 012 — Redirect URLs Must Match A Registered App-Client Origin
+
+**Date:** 2026-04-26
+**Status:** Decided
+
+**Decision:** Every Knuckles ceremony that accepts a caller-supplied
+``redirect_url`` (magic-link ``/start``, Google ``/start``, Apple
+``/start``) validates that the URL's origin
+(``scheme://host[:port]``, default 80/443 dropped) appears in the
+calling app-client's ``allowed_origins`` list. A mismatch raises
+``VALIDATION_ERROR`` with HTTP 422.
+
+**Rationale:**
+``app_clients.allowed_origins`` was always collected at registration
+but never consulted, which let any holder of a valid client_secret
+inject any URL into a magic-link email or pivot a leaked OAuth
+authorization code to an attacker-controlled callback. The check is
+free (origin parsing + a set lookup), every consuming app already
+has the data registered, and it closes the most obvious abuse path
+without changing the public API shape for legitimate callers.
+
+**Alternatives considered:**
+- **Compare full redirect URL strings** — rejected. Forces operators
+  to register every callback path, including future additions.
+  Origin-only is the standard OAuth2 pattern.
+- **Per-app-client redirect-URL allowlist (a separate column)** —
+  rejected. ``allowed_origins`` already exists and is the right
+  granularity; adding a parallel list doubles the registration
+  surface for no extra safety.
+
+**Consequences:**
+- Operators must register every origin a consuming app uses (prod,
+  staging, local-dev) before that app can drive a ceremony from it.
+- An origin registered with a trailing ``/`` still matches the
+  origin form without — see ``_origin_of`` in
+  ``knuckles/core/app_client_auth.py``.
+- The CORS allow-list helper (Decision #013) reuses the same
+  origin-normalization logic.
+
+---
+
+### 013 — Strict CORS Is Opt-In, Backed By The App-Client Origin Set
+
+**Date:** 2026-04-26
+**Status:** Decided
+
+**Decision:** When ``KNUCKLES_STRICT_CORS=true``, Knuckles emits
+``Access-Control-Allow-Origin`` only when the request's ``Origin``
+header appears in the union of every registered app-client's
+``allowed_origins`` (with a 60s in-process cache). Default is
+``false``, which keeps the wildcard ``Allow-Origin: *`` behavior
+that was in place when consuming apps were proxying every Knuckles
+call from their backend (so CORS was not on the request path).
+
+**Rationale:**
+A flag-gated rollout lets the production deploy ship the code and
+flip it on per-environment after observing logs, instead of forcing
+a coordinated cutover. The default-off behavior preserves existing
+integrations (Greenroom proxies from its backend; CORS does not
+matter to those calls). Once strict mode is on, browser-direct
+requests from unknown origins get no ``Allow-Origin`` header — the
+browser refuses the response, which is the right failure mode.
+
+**Alternatives considered:**
+- **Always-strict, no env flag** — rejected. Couples the rollout
+  to a code deploy with no rollback that doesn't require another
+  deploy.
+- **Per-app-client CORS configuration on the request path** —
+  rejected. There is no app-client context on routes like ``/health``
+  or the JWKS endpoint, so a per-client lookup would need a
+  fallback anyway. The union approach is simpler and equally safe.
+
+**Consequences:**
+- The cache TTL (60s) is the maximum delay between
+  ``register_app_client.py`` and a new origin being honored by CORS.
+- A future Redis-backed implementation would replace
+  ``knuckles/core/cors.py`` without changing the
+  ``is_origin_allowed`` signature.
+
+---
+
+### 014 — Magic-Link Sends Are Per-Email Rate-Limited In-Process
+
+**Date:** 2026-04-26
+**Status:** Decided
+
+**Decision:** ``POST /v1/auth/magic-link/start`` is throttled by an
+in-process sliding-window counter keyed by
+``(app_client_id, email)``. Default budget: 5 sends per hour. Excess
+calls return HTTP 429 with code ``RATE_LIMITED`` and no email is
+sent.
+
+**Rationale:**
+Without a limit, anyone holding valid app-client credentials could
+loop a victim's address through Resend, weaponizing Knuckles into
+an email bomb. Per-IP limits are not useful because consuming apps
+proxy from a single backend IP — per-email is the right axis, scoped
+per app-client so two apps' budgets don't collide. In-process
+counters are intentionally minimal: each gunicorn worker keeps its
+own state (effective limit ≈ ``WEB_CONCURRENCY × 5/hour``), which
+is plenty until traffic justifies a Redis-backed limiter.
+
+**Alternatives considered:**
+- **Redis-backed precise distributed limiter** — deferred. Adds an
+  operational dependency for a problem that the in-process counter
+  bounds adequately at current scale. The ``RateLimiter.allow``
+  signature is stable so a future swap is a one-file change.
+- **Per-IP rate limiting** — rejected for the proxy-architecture
+  reason above. Could be added in addition without conflict.
+
+**Consequences:**
+- A user who genuinely needs more than 5 magic-link emails in an
+  hour for the same app gets blocked. The 429 carries a clear
+  message — the consuming app can surface it as a friendly retry
+  prompt.
+- Tests reset the limiter via the autouse
+  ``_reset_rate_and_cors_caches`` fixture so ordering is hermetic.
+
+---
+
+### 015 — Client SDKs Live In The Knuckles Repo, Not Separate Repos
+
+**Date:** 2026-04-26
+**Status:** Decided
+
+**Decision:** Two first-party SDKs ship inside the Knuckles repo:
+``packages/knuckles-client-py/`` (Python, ``pip install knuckles-client``)
+and ``packages/knuckles-client-ts/`` (TypeScript, ``npm install
+@knuckles/client``). Both expose a single ``KnucklesClient`` class
+with sub-clients per ceremony, JWKS-cached local token verification,
+and a typed exception hierarchy mapped to the Knuckles error-code
+vocabulary. An OpenAPI 3.1 contract lives at ``docs/openapi.yaml``
+for any consumer outside those two ecosystems.
+
+**Rationale:**
+The most common integration mistakes are: forgetting ``audience``
+verification, forgetting to swap in the rotated refresh token, and
+treating ``REFRESH_TOKEN_REUSED`` as a generic 401. An SDK encodes
+those once and removes them as failure modes for every consumer.
+Co-locating the SDKs with the service keeps drift impossible —
+adding a new endpoint server-side is paired with the SDK addition
+in the same change.
+
+**Alternatives considered:**
+- **Separate repos per SDK** — rejected. Releases would lag the
+  service; PRs touching both surfaces would span repos. With one
+  consuming app today (Greenroom) the coupling is a feature.
+- **Generate the SDK from OpenAPI** — deferred. Hand-written gives
+  ergonomic method names (``client.google.start(...)`` vs
+  ``client.googleStart(...)``) and proper async-first shapes.
+  Consider a generator if a third or fourth SDK ecosystem becomes
+  necessary.
+
+**Consequences:**
+- Adding a Knuckles endpoint requires adding the matching SDK method
+  in the same PR. Both SDK READMEs list the full method surface so
+  the gap is visible at review.
+- The OpenAPI spec is the contract for non-Python/TS consumers; it
+  must stay in sync with the routes (``docs/openapi.yaml`` covers
+  every path in ``knuckles/api/v1/``).
+- The TypeScript SDK targets Node 18+ (native ``fetch``, ``jose`` for
+  JWKS). It runs unchanged in browsers but must not — the
+  ``client_secret`` must stay server-side.

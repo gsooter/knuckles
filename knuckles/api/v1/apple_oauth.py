@@ -22,7 +22,11 @@ from flask.wrappers import Response
 
 from knuckles.api.v1 import api_v1
 from knuckles.core import database
-from knuckles.core.app_client_auth import get_current_app_client, require_app_client
+from knuckles.core.app_client_auth import (
+    assert_redirect_allowed,
+    get_current_app_client,
+    require_app_client,
+)
 from knuckles.core.exceptions import ValidationError
 from knuckles.services import apple_oauth
 
@@ -60,6 +64,7 @@ def apple_start_route() -> tuple[Response, int]:
     """
     redirect_url = _require_string_field("redirect_url")
     app_client = get_current_app_client()
+    assert_redirect_allowed(app_client, redirect_url)
 
     issued = apple_oauth.build_authorize_url(
         redirect_uri=redirect_url,

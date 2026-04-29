@@ -24,6 +24,7 @@ recovery behavior for a leaked token.
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 import uuid
 from dataclasses import dataclass
@@ -41,6 +42,8 @@ from knuckles.core.exceptions import (
 )
 from knuckles.core.jwt import issue_access_token
 from knuckles.data.repositories import auth as repo
+
+_audit = logging.getLogger("knuckles.audit")
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,11 @@ def issue_session(
         expires_at=refresh_expires_at,
     )
 
+    _audit.info(
+        "session_issued user_id=%s app_client_id=%s",
+        user_uuid,
+        app_client_id,
+    )
     return TokenPair(
         access_token=access_token,
         access_token_expires_at=access_expires_at,
@@ -181,7 +189,15 @@ def rotate_refresh_token(
         )
 
     if row.used_at is not None:
-        repo.revoke_all_refresh_tokens_for_user(session, row.user_id)
+        revoked = repo.revoke_all_refresh_tokens_for_user(session, row.user_id)
+        _audit.warning(
+            "refresh_token_reused user_id=%s app_client_id=%s "
+            "tokens_revoked=%d — every session for this user has been "
+            "invalidated; user must re-authenticate.",
+            row.user_id,
+            app_client_id,
+            revoked,
+        )
         raise AppError(
             code=REFRESH_TOKEN_REUSED,
             message="Refresh token has already been used.",

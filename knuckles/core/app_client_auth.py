@@ -20,11 +20,12 @@ import hmac
 from collections.abc import Callable
 from functools import wraps
 from typing import ParamSpec, TypeVar, cast
+from urllib.parse import urlparse
 
 from flask import g, request
 
 from knuckles.core import database
-from knuckles.core.exceptions import INVALID_CLIENT, UnauthorizedError
+from knuckles.core.exceptions import INVALID_CLIENT, UnauthorizedError, ValidationError
 from knuckles.data.models import AppClient
 from knuckles.data.repositories import auth as repo
 
@@ -94,3 +95,56 @@ def get_current_app_client() -> AppClient:
             "get_current_app_client called outside a require_app_client view."
         )
     return cast("AppClient", client)
+
+
+def _origin_of(url: str) -> str | None:
+    """Return ``scheme://host[:port]`` for a URL, or ``None`` if invalid.
+
+    Default ports (80 for http, 443 for https) are dropped so the
+    comparison matches how :func:`scripts/register_app_client.py`
+    persists allowed origins (no trailing port for the defaults).
+
+    Args:
+        url: The redirect URL or origin string to canonicalize.
+
+    Returns:
+        The canonical origin string, or ``None`` if the URL has no
+        scheme/host or carries a scheme other than ``http``/``https``.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname
+    port = parsed.port
+    if port is None or (parsed.scheme == "http" and port == 80):
+        return f"{parsed.scheme}://{host}"
+    if parsed.scheme == "https" and port == 443:
+        return f"{parsed.scheme}://{host}"
+    return f"{parsed.scheme}://{host}:{port}"
+
+
+def assert_redirect_allowed(client: AppClient, redirect_url: str) -> None:
+    """Reject a redirect URL whose origin is not in ``client.allowed_origins``.
+
+    Without this check a caller holding valid client credentials could
+    point Knuckles at any redirect URL — for the magic-link flow that
+    means injecting an arbitrary URL into outgoing email; for OAuth it
+    means pivoting a leaked authorization code.
+
+    Args:
+        client: The :class:`AppClient` row resolved by
+            :func:`require_app_client`.
+        redirect_url: The full redirect URL the caller passed in.
+
+    Raises:
+        ValidationError: If the URL is malformed, uses a non-HTTP(S)
+            scheme, or its origin is not registered for this client.
+    """
+    origin = _origin_of(redirect_url)
+    if origin is None:
+        raise ValidationError("'redirect_url' must be an absolute http(s) URL.")
+    allowed = {o.rstrip("/") for o in client.allowed_origins}
+    if origin not in allowed:
+        raise ValidationError(
+            f"'redirect_url' origin {origin!r} is not registered for this app-client."
+        )

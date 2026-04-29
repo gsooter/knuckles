@@ -16,8 +16,14 @@ from flask.testing import FlaskClient
 from sqlalchemy.orm import Session
 
 import knuckles.core.database as database
-from knuckles.core.app_client_auth import get_current_app_client, require_app_client
-from knuckles.core.exceptions import AppError
+from knuckles.core.app_client_auth import (
+    _origin_of,
+    assert_redirect_allowed,
+    get_current_app_client,
+    require_app_client,
+)
+from knuckles.core.exceptions import AppError, ValidationError
+from knuckles.data.models import AppClient
 from knuckles.data.repositories import auth as repo
 
 
@@ -144,3 +150,63 @@ def test_get_current_app_client_outside_decorator_raises() -> None:
         g.pop("app_client", None)
         with pytest.raises(RuntimeError):
             get_current_app_client()
+
+
+def _client_with_origins(*origins: str) -> AppClient:
+    """Build an in-memory ``AppClient`` carrying the given allowed origins.
+
+    Args:
+        *origins: Origin strings to register as allowed.
+
+    Returns:
+        A populated :class:`AppClient` (not bound to any session).
+    """
+    return AppClient(
+        client_id="test",
+        app_name="Test",
+        client_secret_hash="x",
+        allowed_origins=list(origins),
+    )
+
+
+def test_origin_of_strips_default_ports() -> None:
+    """Default 80/443 ports are dropped so they match registered origins."""
+    assert _origin_of("http://localhost:80/path") == "http://localhost"
+    assert _origin_of("https://example.com:443/x") == "https://example.com"
+
+
+def test_origin_of_keeps_non_default_port() -> None:
+    """Non-default ports survive normalization."""
+    assert _origin_of("http://localhost:3000/auth") == "http://localhost:3000"
+
+
+def test_origin_of_rejects_non_http_scheme() -> None:
+    """``javascript:`` and friends do not parse to an origin."""
+    assert _origin_of("javascript:alert(1)") is None
+    assert _origin_of("not a url") is None
+
+
+def test_assert_redirect_allowed_accepts_matching_origin() -> None:
+    """A redirect under a registered origin passes."""
+    client = _client_with_origins("http://localhost:3000")
+    assert_redirect_allowed(client, "http://localhost:3000/auth/verify")
+
+
+def test_assert_redirect_allowed_rejects_unregistered_origin() -> None:
+    """A redirect to a different origin is a ``VALIDATION_ERROR``."""
+    client = _client_with_origins("http://localhost:3000")
+    with pytest.raises(ValidationError):
+        assert_redirect_allowed(client, "http://evil.example.com/steal")
+
+
+def test_assert_redirect_allowed_rejects_malformed_url() -> None:
+    """Non-URL input is rejected as a validation error."""
+    client = _client_with_origins("http://localhost:3000")
+    with pytest.raises(ValidationError):
+        assert_redirect_allowed(client, "not a url")
+
+
+def test_assert_redirect_allowed_tolerates_trailing_slash_in_registration() -> None:
+    """An origin registered with a trailing slash still matches."""
+    client = _client_with_origins("http://localhost:3000/")
+    assert_redirect_allowed(client, "http://localhost:3000/auth/verify")

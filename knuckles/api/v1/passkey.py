@@ -26,7 +26,12 @@ from knuckles.api.v1 import api_v1
 from knuckles.core import database
 from knuckles.core.app_client_auth import get_current_app_client, require_app_client
 from knuckles.core.auth import get_current_user_id, require_auth
-from knuckles.core.exceptions import ValidationError
+from knuckles.core.exceptions import (
+    PASSKEY_AUTH_FAILED,
+    NotFoundError,
+    ValidationError,
+)
+from knuckles.data.repositories import auth as repo
 from knuckles.services import passkey
 
 
@@ -117,6 +122,64 @@ def passkey_register_complete_route() -> tuple[Response, int]:
         name=name,
     )
     return jsonify({"data": {"credential_id": cred_id}}), 201
+
+
+@api_v1.get("/auth/passkey")
+@require_auth
+def passkey_list_route() -> tuple[Response, int]:
+    """List every passkey registered to the authenticated user.
+
+    Returns:
+        Tuple of JSON body (``{"data": [{"credential_id", "name",
+        "transports", "created_at", "last_used_at"}, ...]}``) and
+        HTTP 200. Returns an empty list if the user has none.
+    """
+    user_id = get_current_user_id()
+    session = database.get_db()
+    creds = repo.list_passkeys_for_user(session, user_id)
+    body: dict[str, Any] = {
+        "data": [
+            {
+                "credential_id": cred.credential_id,
+                "name": cred.name,
+                "transports": cred.transports,
+                "created_at": cred.created_at.isoformat(),
+                "last_used_at": (
+                    cred.last_used_at.isoformat() if cred.last_used_at else None
+                ),
+            }
+            for cred in creds
+        ]
+    }
+    return jsonify(body), 200
+
+
+@api_v1.delete("/auth/passkey/<path:credential_id>")
+@require_auth
+def passkey_delete_route(credential_id: str) -> tuple[Response, int]:
+    """Remove a passkey owned by the authenticated user.
+
+    The ownership check is enforced in the repository — a user
+    cannot delete another user's credential by guessing its id.
+
+    Args:
+        credential_id: Base64url-encoded credential id from the URL.
+
+    Returns:
+        Tuple of empty JSON body and HTTP 204.
+
+    Raises:
+        NotFoundError: With code ``PASSKEY_AUTH_FAILED`` if no matching
+            passkey is registered to the current user.
+    """
+    user_id = get_current_user_id()
+    session = database.get_db()
+    deleted = repo.delete_passkey_for_user(
+        session, user_id=user_id, credential_id=credential_id
+    )
+    if not deleted:
+        raise NotFoundError(code=PASSKEY_AUTH_FAILED, message="Passkey not found.")
+    return jsonify({}), 204
 
 
 @api_v1.post("/auth/passkey/sign-in/begin")

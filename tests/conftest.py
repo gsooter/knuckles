@@ -84,6 +84,27 @@ def _reset_signing_key_cache() -> Iterator[None]:
     reset_key_cache()
 
 
+@pytest.fixture(autouse=True)
+def _reset_rate_and_cors_caches() -> Iterator[None]:
+    """Drop in-process caches between tests.
+
+    The magic-link rate limiter and the CORS allow-list cache hold
+    state across tests when not reset, which would leak ordering
+    dependencies into the suite.
+
+    Yields:
+        None.
+    """
+    from knuckles.core.cors import reset_cache as reset_cors_cache
+    from knuckles.core.rate_limit import magic_link_limiter
+
+    magic_link_limiter.reset()
+    reset_cors_cache()
+    yield
+    magic_link_limiter.reset()
+    reset_cors_cache()
+
+
 @pytest.fixture()
 def db_session() -> Iterator[Session]:
     """Yield a fresh SQLite-backed SQLAlchemy session per test.

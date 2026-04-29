@@ -23,6 +23,13 @@ def setup_logging(*, debug: bool = False) -> None:
     root_logger.setLevel(level)
     root_logger.addHandler(handler)
 
+    # The audit logger is a child of "knuckles" but we pin its level
+    # to INFO regardless of debug so successful sign-ins always show
+    # up in production logs (and the WARNING-level reuse-detection
+    # event is impossible to silence accidentally).
+    audit_logger = logging.getLogger("knuckles.audit")
+    audit_logger.setLevel(logging.INFO)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Return a named logger under the ``knuckles`` namespace.
