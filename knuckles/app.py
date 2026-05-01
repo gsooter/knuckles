@@ -11,7 +11,12 @@ from knuckles.core.config import get_settings
 from knuckles.core.database import init_db
 from knuckles.core.exceptions import AppError
 from knuckles.core.jwt import get_jwks
-from knuckles.core.logging import setup_logging
+from knuckles.core.logging import get_logger, setup_logging
+from knuckles.core.observability import (
+    get_request_id,
+    init_request_correlation,
+    request_context,
+)
 
 # Browser caches and consuming-app JWKS clients should not refetch the
 # key set on every token verification — but should refetch frequently
@@ -34,6 +39,7 @@ def create_app() -> Flask:
     app.config["DEBUG"] = settings.debug
 
     init_db(app)
+    init_request_correlation(app)
     _register_error_handlers(app)
     app.after_request(_add_cors_headers)
     app.register_blueprint(api_v1)
@@ -103,13 +109,23 @@ def create_app() -> Flask:
 def _register_error_handlers(app: Flask) -> None:
     """Register JSON error handlers on the app.
 
+    All three handlers attach the request id (from
+    :func:`knuckles.core.observability.get_request_id`) to the response
+    body under ``meta.request_id`` and log a structured line so
+    operators can grep server logs for the same id a customer quotes.
+
     Args:
         app: The Flask application instance.
     """
+    error_log = get_logger("errors")
 
     @app.errorhandler(AppError)
     def handle_app_error(error: AppError) -> tuple[dict[str, Any], int]:
-        """Return a standardized JSON body for a known ``AppError``.
+        """Log + return a standardized JSON body for a known ``AppError``.
+
+        Every ``AppError`` is logged at WARNING with full request
+        context. This is the primary signal for "something failed in a
+        way the consuming app saw, here's why."
 
         Args:
             error: The raised ``AppError`` instance.
@@ -117,13 +133,19 @@ def _register_error_handlers(app: Flask) -> None:
         Returns:
             Tuple of JSON error response and the error's HTTP status.
         """
-        return {
-            "error": {"code": error.code, "message": error.message},
-        }, error.status_code
+        ctx = request_context()
+        error_log.warning(
+            "%s [%d] %s | %s",
+            error.code,
+            error.status_code,
+            error.message,
+            " ".join(f"{k}={v!r}" for k, v in ctx.items()),
+        )
+        return _error_envelope(error.code, error.message), error.status_code
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException) -> tuple[dict[str, Any], int]:
-        """Return a standardized JSON body for Werkzeug HTTP exceptions.
+        """Log + return a standardized JSON body for Werkzeug exceptions.
 
         Args:
             error: The raised ``HTTPException``.
@@ -131,16 +153,26 @@ def _register_error_handlers(app: Flask) -> None:
         Returns:
             Tuple of JSON error response and the exception's HTTP code.
         """
-        return {
-            "error": {
-                "code": error.name.upper().replace(" ", "_"),
-                "message": error.description or str(error),
-            }
-        }, error.code or 500
+        code = error.name.upper().replace(" ", "_") if error.name else "HTTP_ERROR"
+        message = error.description or str(error)
+        ctx = request_context()
+        error_log.warning(
+            "%s [%d] %s | %s",
+            code,
+            error.code or 500,
+            message,
+            " ".join(f"{k}={v!r}" for k, v in ctx.items()),
+        )
+        return _error_envelope(code, message), error.code or 500
 
     @app.errorhandler(Exception)
     def handle_unexpected_error(error: Exception) -> tuple[dict[str, Any], int]:
-        """Log and generically respond to any unhandled exception.
+        """Log a stack trace and return an opaque 500 response.
+
+        The customer app cannot debug an internal exception (we don't
+        expose its details for security reasons), but it CAN report the
+        request id and the operator finds the full stack trace in the
+        logs by grepping for that id.
 
         Args:
             error: The unhandled exception.
@@ -148,13 +180,38 @@ def _register_error_handlers(app: Flask) -> None:
         Returns:
             Tuple of generic-500 JSON body and HTTP 500.
         """
-        app.logger.exception("Unhandled exception: %s", error)
-        return {
-            "error": {
-                "code": "INTERNAL_SERVER_ERROR",
-                "message": "An unexpected error occurred.",
-            }
-        }, 500
+        ctx = request_context()
+        error_log.exception(
+            "INTERNAL_SERVER_ERROR [500] %s | %s",
+            error,
+            " ".join(f"{k}={v!r}" for k, v in ctx.items()),
+        )
+        return (
+            _error_envelope(
+                "INTERNAL_SERVER_ERROR",
+                "An unexpected error occurred. Quote the request_id when "
+                "reporting this issue.",
+            ),
+            500,
+        )
+
+
+def _error_envelope(code: str, message: str) -> dict[str, Any]:
+    """Build the standard JSON error response with request-id metadata.
+
+    Args:
+        code: Machine-readable error code.
+        message: Human-readable error message.
+
+    Returns:
+        A dict shaped ``{"error": {...}, "meta": {"request_id": ...}}``
+        ready to ``jsonify``.
+    """
+    body: dict[str, Any] = {"error": {"code": code, "message": message}}
+    rid = get_request_id()
+    if rid:
+        body["meta"] = {"request_id": rid}
+    return body
 
 
 def _add_cors_headers(response):  # type: ignore[no-untyped-def]

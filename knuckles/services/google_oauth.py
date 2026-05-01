@@ -27,10 +27,14 @@ from sqlalchemy.orm import Session
 
 from knuckles.core.config import get_settings
 from knuckles.core.exceptions import GOOGLE_AUTH_FAILED, AppError
+from knuckles.core.logging import get_logger
+from knuckles.core.observability import log_and_raise
 from knuckles.core.state_jwt import issue_state, verify_state
 from knuckles.data.models import OAuthProvider
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
+
+_logger = get_logger("services.google_oauth")
 
 _AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -258,18 +262,69 @@ def _post_token(code: str, redirect_uri: str) -> dict[str, Any]:
             timeout=_HTTP_TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:  # pragma: no cover — network path
-        raise AppError(
-            code=GOOGLE_AUTH_FAILED,
-            message="Could not reach Google to exchange the code.",
-            status_code=502,
-        ) from exc
+        log_and_raise(
+            AppError(
+                code=GOOGLE_AUTH_FAILED,
+                message=f"Could not reach Google to exchange the code: {exc}",
+                status_code=502,
+            ),
+            logger=_logger,
+            detail="network_failure",
+            redirect_uri=redirect_uri,
+        )
     if response.status_code != 200:
-        raise AppError(
-            code=GOOGLE_AUTH_FAILED,
-            message="Google rejected the authorization code.",
-            status_code=400,
+        # Google's token endpoint surfaces a useful machine-readable
+        # ``error`` plus a free-form ``error_description``. Pass them
+        # through to the caller so a stale/already-redeemed code says
+        # so instead of just "Google rejected".
+        google_error, google_desc = _parse_oauth_error(response)
+        log_and_raise(
+            AppError(
+                code=GOOGLE_AUTH_FAILED,
+                message=(
+                    f"Google rejected the authorization code: "
+                    f"{google_error or 'unknown'}"
+                    + (f" — {google_desc}" if google_desc else "")
+                ),
+                status_code=400,
+            ),
+            logger=_logger,
+            detail=google_error or "unknown",
+            google_status=response.status_code,
+            google_description=google_desc,
+            redirect_uri=redirect_uri,
         )
     return dict(response.json())
+
+
+def _parse_oauth_error(response: requests.Response) -> tuple[str | None, str | None]:
+    """Pull ``error`` and ``error_description`` from a Google error body.
+
+    Google's OAuth 2.0 endpoints return JSON of the form
+    ``{"error": "invalid_grant", "error_description": "Code was already
+    redeemed."}`` on failure. We parse defensively because an upstream
+    proxy or LB can intercept and return non-JSON.
+
+    Args:
+        response: The :class:`requests.Response` from Google.
+
+    Returns:
+        Tuple of ``(error, error_description)``. Either may be
+        ``None`` if the body was not parseable JSON or did not carry
+        the expected fields.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(body, dict):
+        return None, None
+    err = body.get("error")
+    desc = body.get("error_description")
+    return (
+        err if isinstance(err, str) else None,
+        desc if isinstance(desc, str) else None,
+    )
 
 
 def _get_profile(access_token: str) -> dict[str, Any]:
@@ -292,15 +347,30 @@ def _get_profile(access_token: str) -> dict[str, Any]:
             timeout=_HTTP_TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:  # pragma: no cover — network path
-        raise AppError(
-            code=GOOGLE_AUTH_FAILED,
-            message="Could not reach Google to load the profile.",
-            status_code=502,
-        ) from exc
+        log_and_raise(
+            AppError(
+                code=GOOGLE_AUTH_FAILED,
+                message=f"Could not reach Google to load the profile: {exc}",
+                status_code=502,
+            ),
+            logger=_logger,
+            detail="network_failure",
+        )
     if response.status_code != 200:
-        raise AppError(
-            code=GOOGLE_AUTH_FAILED,
-            message="Could not load Google profile.",
-            status_code=400,
+        google_error, google_desc = _parse_oauth_error(response)
+        log_and_raise(
+            AppError(
+                code=GOOGLE_AUTH_FAILED,
+                message=(
+                    f"Could not load Google profile: "
+                    f"HTTP {response.status_code}"
+                    + (f" ({google_error})" if google_error else "")
+                    + (f" — {google_desc}" if google_desc else "")
+                ),
+                status_code=400,
+            ),
+            logger=_logger,
+            detail=google_error or f"http_{response.status_code}",
+            google_status=response.status_code,
         )
     return dict(response.json())

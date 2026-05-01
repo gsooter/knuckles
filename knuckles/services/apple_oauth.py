@@ -34,10 +34,14 @@ from sqlalchemy.orm import Session
 
 from knuckles.core.config import get_settings
 from knuckles.core.exceptions import APPLE_AUTH_FAILED, AppError
+from knuckles.core.logging import get_logger
+from knuckles.core.observability import log_and_raise
 from knuckles.core.state_jwt import issue_state, verify_state
 from knuckles.data.models import OAuthProvider
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
+
+_logger = get_logger("services.apple_oauth")
 
 _AUTHORIZE_URL = "https://appleid.apple.com/auth/authorize"
 _TOKEN_URL = "https://appleid.apple.com/auth/token"
@@ -333,18 +337,67 @@ def _post_token(code: str, redirect_uri: str, client_secret: str) -> dict[str, A
             timeout=_HTTP_TIMEOUT_SECONDS,
         )
     except requests.RequestException as exc:  # pragma: no cover — network path
-        raise AppError(
-            code=APPLE_AUTH_FAILED,
-            message="Could not reach Apple to exchange the code.",
-            status_code=502,
-        ) from exc
+        log_and_raise(
+            AppError(
+                code=APPLE_AUTH_FAILED,
+                message=f"Could not reach Apple to exchange the code: {exc}",
+                status_code=502,
+            ),
+            logger=_logger,
+            detail="network_failure",
+            redirect_uri=redirect_uri,
+        )
     if response.status_code != 200:
-        raise AppError(
-            code=APPLE_AUTH_FAILED,
-            message="Apple rejected the authorization code.",
-            status_code=400,
+        # Apple's token endpoint follows the OAuth 2.0 error envelope:
+        # {"error": "invalid_grant", "error_description": "..."}.
+        apple_error, apple_desc = _parse_oauth_error(response)
+        log_and_raise(
+            AppError(
+                code=APPLE_AUTH_FAILED,
+                message=(
+                    f"Apple rejected the authorization code: "
+                    f"{apple_error or 'unknown'}"
+                    + (f" — {apple_desc}" if apple_desc else "")
+                ),
+                status_code=400,
+            ),
+            logger=_logger,
+            detail=apple_error or "unknown",
+            apple_status=response.status_code,
+            apple_description=apple_desc,
+            redirect_uri=redirect_uri,
         )
     return dict(response.json())
+
+
+def _parse_oauth_error(response: requests.Response) -> tuple[str | None, str | None]:
+    """Pull ``error`` and ``error_description`` from an Apple error body.
+
+    Apple's token endpoint returns OAuth 2.0-shaped error envelopes
+    on failure. Same shape as Google: ``{"error": "...",
+    "error_description": "..."}``. Parse defensively because an
+    upstream proxy can intercept and return non-JSON.
+
+    Args:
+        response: The :class:`requests.Response` from Apple.
+
+    Returns:
+        Tuple of ``(error, error_description)``. Either may be
+        ``None`` if the body was not parseable JSON or did not
+        carry the expected fields.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None, None
+    if not isinstance(body, dict):
+        return None, None
+    err = body.get("error")
+    desc = body.get("error_description")
+    return (
+        err if isinstance(err, str) else None,
+        desc if isinstance(desc, str) else None,
+    )
 
 
 def _verify_id_token(id_token: str) -> dict[str, Any]:
@@ -377,8 +430,12 @@ def _verify_id_token(id_token: str) -> dict[str, Any]:
             )
         )
     except Exception as exc:  # pragma: no cover — network/crypto path
-        raise AppError(
-            code=APPLE_AUTH_FAILED,
-            message="Apple id token could not be verified.",
-            status_code=400,
-        ) from exc
+        log_and_raise(
+            AppError(
+                code=APPLE_AUTH_FAILED,
+                message=f"Apple id token could not be verified: {exc}",
+                status_code=400,
+            ),
+            logger=_logger,
+            detail=type(exc).__name__,
+        )

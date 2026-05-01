@@ -21,6 +21,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Nothing yet._
 
+## [0.1.1] — 2026-05-01
+
+### Added
+
+- `KnucklesAPIError.request_id` — every error raised from a Knuckles
+  HTTP response now carries the server's `meta.request_id` (with a
+  fallback to the `X-Request-Id` response header). The id is also
+  appended to `str(exc)` so logging the exception surfaces it
+  automatically. Quote it when reporting an issue — the operator can
+  grep their server logs for the same id and find the full
+  diagnostic context.
+
+### Changed
+
+- `__str__` of `KnucklesAPIError` (and subclasses) now includes the
+  request id when available, e.g.
+  `GOOGLE_AUTH_FAILED: ... (request_id=abcd-1234)`.
+
+### Compatibility
+
+- Fully backward compatible. `request_id` is optional everywhere and
+  defaults to `None` when talking to a pre-0.1.1 Knuckles server.
+
 ## [0.1.0] — 2026-04-26
 
 Initial release.

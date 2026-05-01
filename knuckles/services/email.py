@@ -124,14 +124,21 @@ class ResendEmailSender:
             ) from exc
 
         if not (200 <= response.status_code < 300):  # pragma: no cover — network path
+            # Resend returns ``{"message": "...", "name": "..."}`` on
+            # error. Surface the human message so the customer app
+            # sees "domain not verified" instead of "Failed to send."
+            resend_message = _parse_resend_error(response)
             _logger.error(
-                "Resend returned status %s: %s",
+                "Resend returned HTTP %s: %s",
                 response.status_code,
                 response.text,
             )
             raise AppError(
                 code=EMAIL_DELIVERY_FAILED,
-                message="Failed to send email.",
+                message=(
+                    f"Resend rejected the send (HTTP {response.status_code})"
+                    + (f": {resend_message}" if resend_message else "")
+                ),
                 status_code=502,
             )
 
@@ -178,6 +185,31 @@ class ConsoleEmailSender:
             subject,
             link,
         )
+
+
+def _parse_resend_error(response: requests.Response) -> str | None:
+    """Extract a human-readable error message from a Resend response.
+
+    Resend returns JSON shaped like ``{"name": "validation_error",
+    "message": "The 'from' field is required."}`` on failure. We
+    parse defensively because the body could be plain text on a
+    proxy/LB intercept.
+
+    Args:
+        response: The :class:`requests.Response` from Resend.
+
+    Returns:
+        The ``message`` field as a string, or ``None`` if the body
+        was not parseable JSON or did not carry the field.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    msg = body.get("message")
+    return msg if isinstance(msg, str) else None
 
 
 def get_default_sender() -> EmailSender:

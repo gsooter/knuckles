@@ -112,6 +112,56 @@ def test_magic_link_start_422_raises_validation_error(
         client.magic_link.start(email="x@y", redirect_url="not-a-url")
 
 
+def test_error_carries_request_id_from_meta(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """The SDK pulls ``meta.request_id`` onto the raised exception."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=429,
+        json={
+            "error": {"code": "RATE_LIMITED", "message": "slow down"},
+            "meta": {"request_id": "abcd-1234"},
+        },
+    )
+    with pytest.raises(KnucklesRateLimitError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="https://app/cb")
+    assert exc_info.value.request_id == "abcd-1234"
+    # Request id is appended to ``str(exc)`` for log-friendliness.
+    assert "request_id=abcd-1234" in str(exc_info.value)
+
+
+def test_error_falls_back_to_x_request_id_header(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """When the body lacks ``meta.request_id`` we fall back to the header."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=422,
+        json={"error": {"code": "VALIDATION_ERROR", "message": "bad"}},
+        headers={"X-Request-Id": "header-only-7"},
+    )
+    with pytest.raises(KnucklesValidationError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="not-a-url")
+    assert exc_info.value.request_id == "header-only-7"
+
+
+def test_error_request_id_is_none_against_old_server(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """Old Knuckles servers don't emit a request id; the field is ``None``."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=422,
+        json={"error": {"code": "VALIDATION_ERROR", "message": "bad"}},
+    )
+    with pytest.raises(KnucklesValidationError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="not-a-url")
+    assert exc_info.value.request_id is None
+    # And the legacy ``str(exc)`` shape (no suffix) is preserved.
+    assert "request_id=" not in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # OAuth (Google + Apple)
 # ---------------------------------------------------------------------------

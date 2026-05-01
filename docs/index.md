@@ -75,6 +75,7 @@ You should look elsewhere if:
 | [Setup Guide](ONBOARDING.html) | The full step-by-step setup for your own Knuckles deployment, with every command and every env var explained. |
 | [Integration](INTEGRATION.html) | How to add Knuckles to your existing app. Has sub-pages for Python and TypeScript. |
 | [Recipes](recipes.html) | Copy-paste solutions for common needs: protecting routes, logging users out, refreshing tokens, etc. |
+| [Error reference](errors.html) | Every error code Knuckles can return, what it means, and how to recover. |
 | [API Reference](api/) | Auto-generated reference for every HTTP endpoint, for if you're rolling your own client. |
 | [FAQ](faq.html) | Questions beginners actually ask. |
 

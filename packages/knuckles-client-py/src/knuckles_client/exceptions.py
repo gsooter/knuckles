@@ -25,20 +25,36 @@ class KnucklesAPIError(KnucklesError):
         code: The ``error.code`` string from the response body.
         message: The human-readable ``error.message``.
         status_code: HTTP status from Knuckles.
+        request_id: The Knuckles ``meta.request_id`` value, if the
+            server returned one. Quote this value when reporting the
+            issue to the operator — they can grep their logs for it
+            and find the matching server-side context. ``None`` only
+            for older Knuckles servers that don't emit it.
     """
 
-    def __init__(self, *, code: str, message: str, status_code: int) -> None:
+    def __init__(
+        self,
+        *,
+        code: str,
+        message: str,
+        status_code: int,
+        request_id: str | None = None,
+    ) -> None:
         """Initialize with the parsed error envelope.
 
         Args:
             code: ``error.code`` from the response.
             message: ``error.message`` from the response.
             status_code: HTTP status code.
+            request_id: Optional ``meta.request_id`` from the response
+                body, for cross-system correlation.
         """
-        super().__init__(f"{code}: {message}")
+        suffix = f" (request_id={request_id})" if request_id else ""
+        super().__init__(f"{code}: {message}{suffix}")
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.request_id = request_id
 
 
 class KnucklesAuthError(KnucklesAPIError):

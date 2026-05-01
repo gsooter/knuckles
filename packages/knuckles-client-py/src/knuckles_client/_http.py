@@ -23,28 +23,52 @@ from .exceptions import (
 _DEFAULT_TIMEOUT_SECONDS = 10
 
 
-def _map_error(*, code: str, message: str, status_code: int) -> KnucklesAPIError:
+def _map_error(
+    *,
+    code: str,
+    message: str,
+    status_code: int,
+    request_id: str | None = None,
+) -> KnucklesAPIError:
     """Promote an error envelope to the matching SDK exception class.
 
     Args:
         code: ``error.code`` from the response body.
         message: ``error.message`` from the response body.
         status_code: HTTP status from Knuckles.
+        request_id: Optional ``meta.request_id`` from the response,
+            propagated onto the exception for log correlation.
 
     Returns:
         A :class:`KnucklesAPIError` (or one of its subclasses).
     """
     if status_code in (401, 403):
-        return KnucklesAuthError(code=code, message=message, status_code=status_code)
+        return KnucklesAuthError(
+            code=code,
+            message=message,
+            status_code=status_code,
+            request_id=request_id,
+        )
     if status_code == 422:
         return KnucklesValidationError(
-            code=code, message=message, status_code=status_code
+            code=code,
+            message=message,
+            status_code=status_code,
+            request_id=request_id,
         )
     if status_code == 429:
         return KnucklesRateLimitError(
-            code=code, message=message, status_code=status_code
+            code=code,
+            message=message,
+            status_code=status_code,
+            request_id=request_id,
         )
-    return KnucklesAPIError(code=code, message=message, status_code=status_code)
+    return KnucklesAPIError(
+        code=code,
+        message=message,
+        status_code=status_code,
+        request_id=request_id,
+    )
 
 
 class HttpTransport:
@@ -163,10 +187,20 @@ class HttpTransport:
             return body
 
         error = body.get("error", {}) if isinstance(body, dict) else {}
+        meta = body.get("meta", {}) if isinstance(body, dict) else {}
+        request_id_raw = meta.get("request_id") if isinstance(meta, dict) else None
+        # Fall back to the response header — older error responses
+        # without a body still emit ``X-Request-Id``.
+        request_id = (
+            request_id_raw
+            if isinstance(request_id_raw, str)
+            else response.headers.get("X-Request-Id")
+        )
         raise _map_error(
             code=str(error.get("code", "UNKNOWN")),
             message=str(error.get("message", "")),
             status_code=response.status_code,
+            request_id=request_id,
         )
 
     def get_json(self, path: str) -> dict[str, Any]:
