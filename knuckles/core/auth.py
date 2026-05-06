@@ -1,7 +1,7 @@
 """Bearer-token auth decorator for Knuckles' own endpoints.
 
 Knuckles issues access tokens; it also *consumes* them on its own first-
-party endpoints (``/v1/me``, passkey registration, connected services).
+party endpoints (``/v1/me``, passkey registration, ``/v1/logout/all``).
 This module is the verifier for those calls.
 
 Every Knuckles access token carries ``aud = app_client_id``. When the
