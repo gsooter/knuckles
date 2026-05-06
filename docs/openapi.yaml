@@ -513,12 +513,22 @@ components:
                 - REFRESH_TOKEN_EXPIRED
                 - REFRESH_TOKEN_REUSED
                 - RATE_LIMITED
-                - SERVICE_NOT_CONNECTED
                 - VALIDATION_ERROR
                 - UNAUTHORIZED
                 - FORBIDDEN
                 - INTERNAL_SERVER_ERROR
             message: { type: string }
+        meta:
+          type: object
+          properties:
+            request_id:
+              type: string
+              format: uuid
+              description: |
+                Per-request correlation id. Mirrored in the
+                `X-Request-Id` response header on every request.
+                Customers quote this when reporting issues so the
+                operator can grep server logs for the full context.
 
     JWKS:
       type: object

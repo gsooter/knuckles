@@ -291,8 +291,16 @@ pytest --cov=knuckles --cov-fail-under=80
 
 ### Error
 ```json
-{ "error": { "code": "TOKEN_EXPIRED", "message": "..." } }
+{
+  "error": { "code": "TOKEN_EXPIRED", "message": "..." },
+  "meta": { "request_id": "9f8d6b7e-2c3a-4f1e-9b8a-1d2c3e4f5a6b" }
+}
 ```
+
+`meta.request_id` is present on every error response (and mirrored in
+the `X-Request-Id` response header on every request, success or
+failure). Customers quote it when reporting issues so the operator can
+grep server logs for the full context. See `docs/errors.md`.
 
 All error codes are constants in `knuckles/core/exceptions.py`. Never
 return raw exception messages to the client.
