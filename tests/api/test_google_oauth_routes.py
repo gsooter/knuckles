@@ -29,27 +29,32 @@ def _stub_google(
         profile: Userinfo payload to return from ``_get_profile``.
         tokens: Token payload to return from ``_post_token``.
     """
+    # ``_post_token`` gained a ``config`` parameter (Decision #017).
     monkeypatch.setattr(
         google_oauth,
         "_post_token",
-        lambda code, redirect_uri: tokens
-        or {
-            "access_token": "google-access",
-            "refresh_token": "google-refresh",
-            "expires_in": 3600,
-        },
+        lambda _config, code, redirect_uri: (
+            tokens
+            or {
+                "access_token": "google-access",
+                "refresh_token": "google-refresh",
+                "expires_in": 3600,
+            }
+        ),
     )
     monkeypatch.setattr(
         google_oauth,
         "_get_profile",
-        lambda access_token: profile
-        or {
-            "sub": "google-sub-123",
-            "email": "user@example.com",
-            "email_verified": True,
-            "name": "User Example",
-            "picture": None,
-        },
+        lambda access_token: (
+            profile
+            or {
+                "sub": "google-sub-123",
+                "email": "user@example.com",
+                "email_verified": True,
+                "name": "User Example",
+                "picture": None,
+            }
+        ),
     )
 
 

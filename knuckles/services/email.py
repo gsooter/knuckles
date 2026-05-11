@@ -70,7 +70,32 @@ class ResendEmailSender:
     normalized into an :class:`AppError` with code
     ``EMAIL_DELIVERY_FAILED`` so the ceremony layer has a single code
     to handle regardless of transport.
+
+    Per-tenant credentials (Decision #017) ride through the
+    constructor: callers that know which app-client they're sending
+    on behalf of build a sender with the tenant's API key and From
+    address. The default constructor reads operator env vars so
+    callers without tenant context (legacy paths, dev tooling) keep
+    working.
     """
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        from_address: str | None = None,
+    ) -> None:
+        """Configure the sender with explicit per-tenant credentials.
+
+        Args:
+            api_key: Resend API key for this send. ``None`` falls back
+                to ``settings.resend_api_key``.
+            from_address: Sender address for the ``From`` header.
+                ``None`` falls back to ``settings.resend_from_email``.
+        """
+        settings = get_settings()
+        self._api_key = api_key or settings.resend_api_key
+        self._from_address = from_address or settings.resend_from_email
 
     def send(
         self,
@@ -88,16 +113,16 @@ class ResendEmailSender:
             body: Email body. Sent as HTML so ``<a>`` links render.
             from_name: Optional display name wrapped around the
                 configured sender address (e.g. ``Greenroom
-                <auth@knuckles.example>``). When omitted, the raw
+                <signin@mail.greenroom.live>``). When omitted, the raw
                 sender address is used.
 
         Raises:
             AppError: With code ``EMAIL_DELIVERY_FAILED`` if Resend
                 returns a non-2xx response or the HTTP call raises.
         """
-        settings = get_settings()
-        sender = settings.resend_from_email
-        from_header = f"{from_name} <{sender}>" if from_name else sender
+        from_header = (
+            f"{from_name} <{self._from_address}>" if from_name else self._from_address
+        )
         payload = {
             "from": from_header,
             "to": [to],
@@ -105,7 +130,7 @@ class ResendEmailSender:
             "html": body,
         }
         headers = {
-            "Authorization": f"Bearer {settings.resend_api_key}",
+            "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
         try:
@@ -212,19 +237,32 @@ def _parse_resend_error(response: requests.Response) -> str | None:
     return msg if isinstance(msg, str) else None
 
 
-def get_default_sender() -> EmailSender:
-    """Return the configured default email backend.
+def get_default_sender(
+    *,
+    api_key: str | None = None,
+    from_address: str | None = None,
+) -> EmailSender:
+    """Return the configured email backend for the given tenant.
 
-    When ``RESEND_API_KEY`` is unset we fall back to
-    :class:`ConsoleEmailSender` so local development can exercise the
-    magic-link flow without real email delivery. Production deploys set
-    the key and get :class:`ResendEmailSender`. Callers are expected
-    to inject their own sender in tests.
+    When neither argument is set and ``RESEND_API_KEY`` is empty in
+    settings we fall back to :class:`ConsoleEmailSender` so local
+    development can exercise the magic-link flow without real email
+    delivery. Production deploys provide the key (either via the
+    per-tenant ``api_key`` argument or the operator env var) and get
+    :class:`ResendEmailSender`. Callers are expected to inject their
+    own sender in tests.
+
+    Args:
+        api_key: Per-tenant Resend API key, when known. Overrides
+            ``settings.resend_api_key``.
+        from_address: Per-tenant sender address. Overrides
+            ``settings.resend_from_email``.
 
     Returns:
         A concrete :class:`EmailSender` implementation.
     """
     settings = get_settings()
-    if not settings.resend_api_key:
+    effective_key = api_key or settings.resend_api_key
+    if not effective_key:
         return ConsoleEmailSender()
-    return ResendEmailSender()
+    return ResendEmailSender(api_key=api_key, from_address=from_address)

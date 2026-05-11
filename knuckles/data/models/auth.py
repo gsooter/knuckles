@@ -38,6 +38,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from knuckles.core.database import Base, TimestampMixin
+from knuckles.core.secrets import EncryptedText
 
 
 class OAuthProvider(enum.StrEnum):
@@ -283,11 +284,43 @@ class AppClient(TimestampMixin, Base):
     stored only as a SHA-256 hash; high-entropy random secrets need
     no password-style hashing.
 
+    Per-tenant config columns (Decision #017) hold each tenant's own
+    Resend / Google OAuth / Apple OAuth / WebAuthn credentials so
+    each consuming app's emails and consent screens use its own
+    brand. A NULL value falls back to the operator-level env var of
+    the same name — the fallback is a transition mechanism that
+    retires when a second tenant is provisioned. Secret-bearing
+    columns are encrypted at rest via :class:`EncryptedText`.
+
     Attributes:
         client_id: Public primary key (e.g. ``greenroom-prod``).
         app_name: Human-friendly name for admin UIs.
         client_secret_hash: SHA-256 hex digest of the client secret.
         allowed_origins: Origins the app may redirect to / run from.
+        resend_api_key: Encrypted Resend API key, or ``None`` to
+            inherit ``settings.resend_api_key``.
+        resend_from_email: Sender address shown on the From line of
+            magic-link emails (``Name <addr>``). ``None`` inherits.
+        google_oauth_client_id: Tenant-owned Google OAuth client id;
+            ``None`` inherits the operator env var.
+        google_oauth_client_secret: Encrypted Google OAuth secret;
+            ``None`` inherits.
+        apple_oauth_client_id: Tenant-owned Apple Services ID;
+            ``None`` inherits.
+        apple_oauth_team_id: Apple Developer team id used to sign the
+            client_secret JWT; ``None`` inherits.
+        apple_oauth_key_id: Apple ``.p8`` key id; ``None`` inherits.
+        apple_oauth_private_key: Encrypted PEM contents of the Apple
+            ``.p8`` private key; ``None`` inherits.
+        webauthn_rp_id: Relying-party id used on WebAuthn ceremonies.
+            **Effectively immutable** once any passkey is registered
+            against this tenant — see Decision #017's open question
+            and the application-layer guardrail in
+            ``scripts/configure_app_client.py``.
+        webauthn_rp_name: Display name on the native passkey prompt;
+            ``None`` inherits.
+        webauthn_origin: Expected origin on WebAuthn ceremonies;
+            ``None`` inherits.
         refresh_tokens: Tokens issued for this client.
     """
 
@@ -299,6 +332,33 @@ class AppClient(TimestampMixin, Base):
     allowed_origins: Mapped[list[str]] = mapped_column(
         JSON, nullable=False, default=list
     )
+
+    # Per-tenant Resend config (Decision #017).
+    resend_api_key: Mapped[str | None] = mapped_column(EncryptedText, nullable=True)
+    resend_from_email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+
+    # Per-tenant Google OAuth client (Decision #017).
+    google_oauth_client_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    google_oauth_client_secret: Mapped[str | None] = mapped_column(
+        EncryptedText, nullable=True
+    )
+
+    # Per-tenant Apple OAuth client (Decision #017).
+    apple_oauth_client_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
+    )
+    apple_oauth_team_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    apple_oauth_key_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    apple_oauth_private_key: Mapped[str | None] = mapped_column(
+        EncryptedText, nullable=True
+    )
+
+    # Per-tenant WebAuthn relying party (Decision #017).
+    webauthn_rp_id: Mapped[str | None] = mapped_column(String(253), nullable=True)
+    webauthn_rp_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    webauthn_origin: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     refresh_tokens: Mapped[list[RefreshToken]] = relationship(
         back_populates="app_client",

@@ -31,6 +31,7 @@ from knuckles.core.logging import get_logger
 from knuckles.core.observability import log_and_raise
 from knuckles.core.state_jwt import issue_state, verify_state
 from knuckles.data.models import OAuthProvider
+from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
 
@@ -60,7 +61,41 @@ class GoogleAuthorizeStart:
     state: str
 
 
+@dataclass(frozen=True)
+class _GoogleConfig:
+    """Resolved Google OAuth client config for one consuming app.
+
+    Reads each field from the ``app_clients`` row when set, falling
+    back to the operator-level env var per Decision #017.
+    """
+
+    client_id: str
+    client_secret: str
+
+
+def _resolve_config(session: Session, app_client_id: str) -> _GoogleConfig:
+    """Look up the tenant's Google OAuth client, falling back to env.
+
+    Args:
+        session: Active SQLAlchemy session for the AppClient lookup.
+        app_client_id: ``app_clients.client_id`` of the caller.
+
+    Returns:
+        A :class:`_GoogleConfig` populated from the per-tenant columns,
+        with operator env vars filling in any nulls.
+    """
+    settings = get_settings()
+    client = repo.get_app_client(session, app_client_id)
+    return _GoogleConfig(
+        client_id=(client and client.google_oauth_client_id)
+        or settings.google_oauth_client_id,
+        client_secret=(client and client.google_oauth_client_secret)
+        or settings.google_oauth_client_secret,
+    )
+
+
 def build_authorize_url(
+    session: Session,
     *,
     redirect_uri: str,
     app_client_id: str,
@@ -68,6 +103,8 @@ def build_authorize_url(
     """Mint a state JWT and assemble the Google consent URL.
 
     Args:
+        session: Active SQLAlchemy session used to load the tenant's
+            Google OAuth config from ``app_clients``.
         redirect_uri: Where Google should send the browser after the
             consent screen. Must be pre-registered in the Google Cloud
             Console for the configured Knuckles client.
@@ -79,7 +116,7 @@ def build_authorize_url(
         A :class:`GoogleAuthorizeStart` carrying the consent URL and
         the state JWT.
     """
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     state = issue_state(
         purpose=_STATE_PURPOSE,
         payload={
@@ -89,7 +126,7 @@ def build_authorize_url(
         ttl_seconds=_STATE_TTL_SECONDS,
     )
     params = {
-        "client_id": settings.google_oauth_client_id,
+        "client_id": config.client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": _SCOPES,
@@ -134,7 +171,8 @@ def complete(
     claims = _verify_state(state, app_client_id=app_client_id)
     redirect_uri = claims["redirect_uri"]
 
-    google_tokens = _post_token(code, redirect_uri)
+    config = _resolve_config(session, app_client_id)
+    google_tokens = _post_token(config, code, redirect_uri)
     access_token = google_tokens.get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise AppError(
@@ -234,10 +272,12 @@ def _verify_state(state: str, *, app_client_id: str) -> dict[str, Any]:
     return claims
 
 
-def _post_token(code: str, redirect_uri: str) -> dict[str, Any]:
+def _post_token(config: _GoogleConfig, code: str, redirect_uri: str) -> dict[str, Any]:
     """Exchange an authorization code for Google access + refresh tokens.
 
     Args:
+        config: Resolved Google OAuth credentials — supplies
+            ``client_id`` and ``client_secret`` for the POST.
         code: Authorization code from Google's redirect.
         redirect_uri: Same value passed to :func:`build_authorize_url`.
 
@@ -248,14 +288,13 @@ def _post_token(code: str, redirect_uri: str) -> dict[str, Any]:
         AppError: With code ``GOOGLE_AUTH_FAILED`` on any non-200
             response or network failure.
     """
-    settings = get_settings()
     try:
         response = requests.post(
             _TOKEN_URL,
             data={
                 "code": code,
-                "client_id": settings.google_oauth_client_id,
-                "client_secret": settings.google_oauth_client_secret,
+                "client_id": config.client_id,
+                "client_secret": config.client_secret,
                 "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
             },

@@ -56,32 +56,39 @@ def _stub_apple(
         profile: id_token claims to return from ``_verify_id_token``.
         tokens: Token payload to return from ``_post_token``.
     """
+    # The three helpers gained a ``config`` parameter when Decision #017
+    # threaded per-tenant credentials through. The stubs accept it and
+    # ignore it.
     monkeypatch.setattr(
         apple_oauth,
         "_mint_client_secret",
-        lambda: "fake-client-secret",
+        lambda _config: "fake-client-secret",
     )
     monkeypatch.setattr(
         apple_oauth,
         "_post_token",
-        lambda code, redirect_uri, client_secret: tokens
-        or {
-            "access_token": "apple-access",
-            "refresh_token": "apple-refresh",
-            "expires_in": 3600,
-            "id_token": "fake-id-token",
-        },
+        lambda _config, code, redirect_uri, client_secret: (
+            tokens
+            or {
+                "access_token": "apple-access",
+                "refresh_token": "apple-refresh",
+                "expires_in": 3600,
+                "id_token": "fake-id-token",
+            }
+        ),
     )
     monkeypatch.setattr(
         apple_oauth,
         "_verify_id_token",
-        lambda id_token: profile
-        or {
-            "sub": "apple-sub-123",
-            "email": "user@example.com",
-            "email_verified": "true",
-            "is_private_email": "false",
-        },
+        lambda _config, id_token: (
+            profile
+            or {
+                "sub": "apple-sub-123",
+                "email": "user@example.com",
+                "email_verified": "true",
+                "is_private_email": "false",
+            }
+        ),
     )
 
 
@@ -92,6 +99,7 @@ def test_build_authorize_url_uses_form_post_response_mode(
     client_id = _register_client(db_session)
 
     result = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -119,6 +127,7 @@ def test_complete_creates_user_and_returns_token_pair(
     _stub_apple(monkeypatch)
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -159,6 +168,7 @@ def test_complete_accepts_relay_email_when_unverified(
     )
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -187,6 +197,7 @@ def test_complete_rejects_unverified_non_relay_email(
     )
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -230,6 +241,7 @@ def test_complete_rejects_state_for_wrong_app_client(
     _stub_apple(monkeypatch)
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -256,6 +268,7 @@ def test_complete_rejects_missing_id_token(
     )
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -275,6 +288,7 @@ def test_complete_reuses_existing_user_by_provider_id(
     _stub_apple(monkeypatch)
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -283,6 +297,7 @@ def test_complete_reuses_existing_user_by_provider_id(
     )
 
     second = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -304,6 +319,7 @@ def test_complete_links_to_existing_email(
     _stub_apple(monkeypatch)
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )
@@ -324,6 +340,7 @@ def test_complete_omits_display_name_when_user_data_missing(
     _stub_apple(monkeypatch)
 
     issued = apple_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/apple/callback",
         app_client_id=client_id,
     )

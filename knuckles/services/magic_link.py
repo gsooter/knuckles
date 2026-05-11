@@ -79,11 +79,11 @@ _BODY_STYLE = (
 )
 _OUTER_TABLE_STYLE = "background:#f5f5f5;padding:40px 20px;"
 _CARD_STYLE = (
-    "max-width:480px;background:#ffffff;" "border-radius:12px;border:1px solid #e5e5e5;"
+    "max-width:480px;background:#ffffff;border-radius:12px;border:1px solid #e5e5e5;"
 )
 _HEADER_CELL_STYLE = "padding:40px 40px 24px;text-align:center;"
 _HEADER_TEXT_STYLE = (
-    "margin:0;font-size:22px;font-weight:600;" "color:#1a1a1a;letter-spacing:-0.3px;"
+    "margin:0;font-size:22px;font-weight:600;color:#1a1a1a;letter-spacing:-0.3px;"
 )
 _BODY_CELL_STYLE = "padding:0 40px 32px;"
 _LEDE_STYLE = "margin:0 0 24px;font-size:16px;line-height:1.5;color:#333;"
@@ -95,7 +95,7 @@ _BUTTON_STYLE = (
 )
 _FALLBACK_LEAD_STYLE = "margin:0 0 8px;font-size:13px;line-height:1.5;color:#666;"
 _FALLBACK_LINK_WRAP_STYLE = (
-    "margin:0;font-size:13px;line-height:1.5;" "color:#888;word-break:break-all;"
+    "margin:0;font-size:13px;line-height:1.5;color:#888;word-break:break-all;"
 )
 _FALLBACK_LINK_STYLE = "color:#888;text-decoration:underline;"
 _FOOTER_CELL_STYLE = "padding:0 40px 32px;border-top:1px solid #eee;"
@@ -197,8 +197,21 @@ def start_magic_link(
     app_client = repo.get_app_client(session, app_client_id)
     app_name = app_client.app_name if app_client is not None else "your account"
 
+    # Per-tenant Resend credentials (Decision #017). Null columns mean
+    # "inherit from operator env var," which ``get_default_sender``
+    # already handles internally — passing through the ``or None`` so
+    # the fallback path stays a single concern.
+    tenant_api_key = app_client.resend_api_key if app_client is not None else None
+    tenant_from_address = (
+        app_client.resend_from_email if app_client is not None else None
+    )
+
     link = _build_link(redirect_url, raw_token)
-    (sender or get_default_sender()).send(
+    effective_sender = sender or get_default_sender(
+        api_key=tenant_api_key,
+        from_address=tenant_from_address,
+    )
+    effective_sender.send(
         to=email,
         subject=f"Sign in to {app_name}",
         body=_render_email_body(link, app_name),

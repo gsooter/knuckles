@@ -253,13 +253,30 @@ Required at startup:
 - `KNUCKLES_JWT_PRIVATE_KEY` (base64-encoded PEM)
 - `KNUCKLES_JWT_KEY_ID`
 - `KNUCKLES_STATE_SECRET`
+- `KNUCKLES_SECRETS_KEY` (Fernet key for encrypted tenant-config
+  columns; generate with `Fernet.generate_key()`). Empty in dev means
+  encrypted columns refuse to read or write — loud failure rather
+  than silent plaintext.
 
-Identity-path optional (empty means the path is not enabled):
+Identity-path optional — these are the **operator-level fallback**
+values used when a per-tenant column on `app_clients` is NULL. New
+deployments should leave them empty and configure each tenant via
+`scripts/configure_app_client.py` instead; the fallback retires once
+a second tenant is provisioned (see Decision #017).
 - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
 - `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`
 - `APPLE_OAUTH_CLIENT_ID`, `APPLE_OAUTH_TEAM_ID`,
   `APPLE_OAUTH_KEY_ID`, `APPLE_OAUTH_PRIVATE_KEY`
 - `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN`
+
+Per-tenant config lives on `app_clients` columns instead of env vars
+(Decision #017). Tenant-shaped fields — Resend sender, Google OAuth
+client, Apple OAuth credentials, WebAuthn relying party — are
+populated via `scripts/register_app_client.py` (new tenant) or
+`scripts/configure_app_client.py` (update / rotate). Secret-bearing
+columns (`resend_api_key`, `google_oauth_client_secret`,
+`apple_oauth_private_key`) are encrypted at rest via the
+`EncryptedText` SQLAlchemy type decorator.
 
 **No music-service env vars exist in Knuckles.** If a future PR adds
 `SPOTIFY_*`, `TIDAL_*`, `APPLE_MUSIC_*`, reject it.

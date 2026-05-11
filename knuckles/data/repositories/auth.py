@@ -480,6 +480,65 @@ def get_app_client(session: Session, client_id: str) -> AppClient | None:
     return session.get(AppClient, client_id)
 
 
+# Set of attributes that ``update_app_client_config`` is allowed to set.
+# Restricting writes to this allow-list prevents the CLI from being
+# turned into a generic ``UPDATE app_clients SET <anything>`` shim —
+# the client secret hash, allowed origins, and timestamps stay out of
+# reach.
+_TENANT_CONFIG_FIELDS: frozenset[str] = frozenset(
+    {
+        "resend_api_key",
+        "resend_from_email",
+        "google_oauth_client_id",
+        "google_oauth_client_secret",
+        "apple_oauth_client_id",
+        "apple_oauth_team_id",
+        "apple_oauth_key_id",
+        "apple_oauth_private_key",
+        "webauthn_rp_id",
+        "webauthn_rp_name",
+        "webauthn_origin",
+    }
+)
+
+
+def update_app_client_config(
+    session: Session,
+    *,
+    client_id: str,
+    **fields: str | None,
+) -> AppClient | None:
+    """Update per-tenant config columns on an existing ``AppClient``.
+
+    Args:
+        session: Active SQLAlchemy session.
+        client_id: Target ``app_clients.client_id``.
+        **fields: Column name → new value (or ``None`` to revert to
+            env-var fallback). Only the per-tenant config columns
+            defined in :data:`_TENANT_CONFIG_FIELDS` are accepted;
+            attempting to set any other attribute raises
+            :class:`ValueError`.
+
+    Returns:
+        The updated ``AppClient``, or ``None`` if no row matches the
+        given ``client_id``.
+
+    Raises:
+        ValueError: If any key in ``fields`` is outside the
+            ``_TENANT_CONFIG_FIELDS`` allow-list.
+    """
+    unknown = set(fields) - _TENANT_CONFIG_FIELDS
+    if unknown:
+        raise ValueError(f"Cannot update non-tenant-config fields: {sorted(unknown)}")
+    client = session.get(AppClient, client_id)
+    if client is None:
+        return None
+    for attr, value in fields.items():
+        setattr(client, attr, value)
+    session.flush()
+    return client
+
+
 # ---------------------------------------------------------------------------
 # Refresh tokens
 # ---------------------------------------------------------------------------

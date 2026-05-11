@@ -102,3 +102,30 @@ def get_token_claims() -> dict[str, object]:
             "get_token_claims called outside a require_auth-decorated view."
         )
     return cast("dict[str, object]", claims)
+
+
+def get_current_app_client_id() -> str:
+    """Return the ``app_client_id`` (``aud`` claim) of the current token.
+
+    Used by routes that need to look up per-tenant configuration
+    (Decision #017) — e.g., the passkey routes resolve the calling
+    app's ``webauthn_rp_id`` from ``app_clients`` rather than from
+    process-global settings.
+
+    Returns:
+        The verified ``aud`` claim as a string.
+
+    Raises:
+        RuntimeError: If called outside a ``require_auth``-decorated
+            view, or if the verified token somehow has no ``aud``
+            (which shouldn't happen — :mod:`knuckles.core.jwt`
+            enforces the claim at decode time).
+    """
+    claims = get_token_claims()
+    aud = claims.get("aud")
+    if not isinstance(aud, str) or not aud:
+        raise RuntimeError(
+            "Current token has no aud claim — token verification should "
+            "have rejected it earlier."
+        )
+    return aud

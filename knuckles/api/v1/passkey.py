@@ -25,7 +25,11 @@ from flask.wrappers import Response
 from knuckles.api.v1 import api_v1
 from knuckles.core import database
 from knuckles.core.app_client_auth import get_current_app_client, require_app_client
-from knuckles.core.auth import get_current_user_id, require_auth
+from knuckles.core.auth import (
+    get_current_app_client_id,
+    get_current_user_id,
+    require_auth,
+)
 from knuckles.core.exceptions import (
     PASSKEY_AUTH_FAILED,
     NotFoundError,
@@ -83,7 +87,11 @@ def passkey_register_begin_route() -> tuple[Response, int]:
     """
     user_id = str(get_current_user_id())
     session = database.get_db()
-    started = passkey.register_begin(session, user_id=user_id)
+    started = passkey.register_begin(
+        session,
+        user_id=user_id,
+        app_client_id=get_current_app_client_id(),
+    )
     body: dict[str, Any] = {
         "data": {
             "options": started.options,
@@ -117,6 +125,7 @@ def passkey_register_complete_route() -> tuple[Response, int]:
     cred_id = passkey.register_complete(
         session,
         user_id=user_id,
+        app_client_id=get_current_app_client_id(),
         credential=credential,
         state=state,
         name=name,
@@ -191,7 +200,9 @@ def passkey_signin_begin_route() -> tuple[Response, int]:
         Tuple of JSON body (``options``, ``state``) and HTTP 200.
     """
     app_client = get_current_app_client()
-    started = passkey.authenticate_begin(app_client_id=app_client.client_id)
+    started = passkey.authenticate_begin(
+        database.get_db(), app_client_id=app_client.client_id
+    )
     body: dict[str, Any] = {
         "data": {
             "options": started.options,
