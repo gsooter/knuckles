@@ -34,6 +34,16 @@ class Settings(BaseSettings):
             ceremony-state JWTs (OAuth ``state``, passkey challenge
             wrappers). Deliberately separate from the RS256 signing key
             because state tokens never leave Knuckles.
+        knuckles_secrets_key: Fernet key for encrypting per-tenant
+            secret-bearing columns on ``app_clients`` (Resend API key,
+            Google OAuth client secret, Apple OAuth private key). A
+            32-byte URL-safe base64 string — generate with
+            ``cryptography.fernet.Fernet.generate_key()``. Loss of this
+            key permanently bricks every encrypted column; back it up
+            out-of-band. Empty in dev means encrypted columns refuse
+            to decrypt (and refuse to be written), which is the right
+            failure mode — silently storing plaintext would be worse.
+            See Decision #017.
         magic_link_ttl_seconds: How long a magic-link token stays
             redeemable before ``expires_at`` invalidates it.
         resend_api_key: Resend API key for magic-link emails.
@@ -78,6 +88,9 @@ class Settings(BaseSettings):
 
     # Ceremony state
     knuckles_state_secret: str
+
+    # Per-tenant secret encryption (Decision #017)
+    knuckles_secrets_key: str = ""
 
     # Magic link
     magic_link_ttl_seconds: int = 15 * 60

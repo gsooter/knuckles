@@ -67,6 +67,7 @@ def apple_start_route() -> tuple[Response, int]:
     assert_redirect_allowed(app_client, redirect_url)
 
     issued = apple_oauth.build_authorize_url(
+        database.get_db(),
         redirect_uri=redirect_url,
         app_client_id=app_client.client_id,
     )

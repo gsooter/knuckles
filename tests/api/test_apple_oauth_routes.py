@@ -29,32 +29,40 @@ def _stub_apple(
         profile: id_token claims to return from ``_verify_id_token``.
         tokens: Token payload to return from ``_post_token``.
     """
+    # The three helpers gained a ``config`` parameter when Decision #017
+    # threaded per-tenant credentials through. The stubs accept it and
+    # ignore it — the resolved tenant config is only used to build
+    # outgoing requests, which these tests don't make.
     monkeypatch.setattr(
         apple_oauth,
         "_mint_client_secret",
-        lambda: "fake-client-secret",
+        lambda _config: "fake-client-secret",
     )
     monkeypatch.setattr(
         apple_oauth,
         "_post_token",
-        lambda code, redirect_uri, client_secret: tokens
-        or {
-            "access_token": "apple-access",
-            "refresh_token": "apple-refresh",
-            "expires_in": 3600,
-            "id_token": "fake-id-token",
-        },
+        lambda _config, code, redirect_uri, client_secret: (
+            tokens
+            or {
+                "access_token": "apple-access",
+                "refresh_token": "apple-refresh",
+                "expires_in": 3600,
+                "id_token": "fake-id-token",
+            }
+        ),
     )
     monkeypatch.setattr(
         apple_oauth,
         "_verify_id_token",
-        lambda id_token: profile
-        or {
-            "sub": "apple-sub-123",
-            "email": "user@example.com",
-            "email_verified": "true",
-            "is_private_email": "false",
-        },
+        lambda _config, id_token: (
+            profile
+            or {
+                "sub": "apple-sub-123",
+                "email": "user@example.com",
+                "email_verified": "true",
+                "is_private_email": "false",
+            }
+        ),
     )
 
 

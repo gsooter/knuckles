@@ -117,9 +117,12 @@ def _register_app_client(db_session: Session) -> str:
 
 def test_register_begin_returns_options_and_state(db_session: Session) -> None:
     """Options carry challenge + rp + user; state JWT decodes back."""
+    client_id = _register_app_client(db_session)
     user = repo.create_user(db_session, email="user@example.com")
 
-    started = passkey.register_begin(db_session, user_id=str(user.id))
+    started = passkey.register_begin(
+        db_session, user_id=str(user.id), app_client_id=client_id
+    )
 
     assert started.options["rp"]["id"] == "localhost"
     assert started.options["user"]["name"] == "user@example.com"
@@ -135,8 +138,11 @@ def test_register_begin_returns_options_and_state(db_session: Session) -> None:
 
 def test_register_begin_rejects_unknown_user(db_session: Session) -> None:
     """A user_id that doesn't resolve raises ``PASSKEY_REGISTRATION_FAILED``."""
+    client_id = _register_app_client(db_session)
     with pytest.raises(AppError) as exc:
-        passkey.register_begin(db_session, user_id=str(uuid.uuid4()))
+        passkey.register_begin(
+            db_session, user_id=str(uuid.uuid4()), app_client_id=client_id
+        )
     assert exc.value.code == PASSKEY_REGISTRATION_FAILED
 
 
@@ -144,13 +150,17 @@ def test_register_complete_persists_credential(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Happy path stores a passkey row and returns the credential id."""
+    client_id = _register_app_client(db_session)
     user = repo.create_user(db_session, email="user@example.com")
     _stub_register_verifier(monkeypatch)
-    started = passkey.register_begin(db_session, user_id=str(user.id))
+    started = passkey.register_begin(
+        db_session, user_id=str(user.id), app_client_id=client_id
+    )
 
     cred_id = passkey.register_complete(
         db_session,
         user_id=str(user.id),
+        app_client_id=client_id,
         credential={
             "id": "cred-id-bytes",
             "response": {"transports": ["internal", "hybrid"]},
@@ -171,15 +181,19 @@ def test_register_complete_rejects_state_for_different_user(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A state minted for user A cannot be redeemed by user B."""
+    client_id = _register_app_client(db_session)
     user_a = repo.create_user(db_session, email="a@example.com")
     user_b = repo.create_user(db_session, email="b@example.com")
     _stub_register_verifier(monkeypatch)
-    started = passkey.register_begin(db_session, user_id=str(user_a.id))
+    started = passkey.register_begin(
+        db_session, user_id=str(user_a.id), app_client_id=client_id
+    )
 
     with pytest.raises(AppError) as exc:
         passkey.register_complete(
             db_session,
             user_id=str(user_b.id),
+            app_client_id=client_id,
             credential={"id": "cred", "response": {}},
             state=started.state,
         )
@@ -190,6 +204,7 @@ def test_register_complete_rejects_invalid_state(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A garbage state JWT raises ``PASSKEY_REGISTRATION_FAILED``."""
+    client_id = _register_app_client(db_session)
     user = repo.create_user(db_session, email="user@example.com")
     _stub_register_verifier(monkeypatch)
 
@@ -197,6 +212,7 @@ def test_register_complete_rejects_invalid_state(
         passkey.register_complete(
             db_session,
             user_id=str(user.id),
+            app_client_id=client_id,
             credential={"id": "cred", "response": {}},
             state="not.a.jwt",
         )
@@ -207,18 +223,22 @@ def test_register_complete_propagates_attestation_failure(
     db_session: Session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If the verifier raises, the service maps it to the registration code."""
+    client_id = _register_app_client(db_session)
     user = repo.create_user(db_session, email="user@example.com")
 
     def _boom(**_kw: Any) -> _FakeRegistration:
         raise RuntimeError("attestation rejected")
 
     monkeypatch.setattr(passkey, "verify_registration_response", _boom)
-    started = passkey.register_begin(db_session, user_id=str(user.id))
+    started = passkey.register_begin(
+        db_session, user_id=str(user.id), app_client_id=client_id
+    )
 
     with pytest.raises(AppError) as exc:
         passkey.register_complete(
             db_session,
             user_id=str(user.id),
+            app_client_id=client_id,
             credential={"id": "cred", "response": {}},
             state=started.state,
         )
@@ -229,7 +249,7 @@ def test_authenticate_begin_returns_options_and_state(db_session: Session) -> No
     """Sign-in options carry rp_id + challenge; state binds the app_client."""
     client_id = _register_app_client(db_session)
 
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     assert started.options["rpId"] == "localhost"
     assert started.options["challenge"]
@@ -257,7 +277,7 @@ def test_authenticate_complete_returns_token_pair(
     )
     _stub_authenticate_verifier(monkeypatch, new_sign_count=5)
 
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     pair = passkey.authenticate_complete(
         db_session,
@@ -279,7 +299,7 @@ def test_authenticate_complete_rejects_unknown_credential(
     """A credential id with no matching row raises ``PASSKEY_AUTH_FAILED``."""
     client_id = _register_app_client(db_session)
     _stub_authenticate_verifier(monkeypatch)
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     with pytest.raises(AppError) as exc:
         passkey.authenticate_complete(
@@ -304,7 +324,7 @@ def test_authenticate_complete_rejects_state_for_wrong_app_client(
         allowed_origins=["http://other.test"],
     )
     _stub_authenticate_verifier(monkeypatch)
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     with pytest.raises(AppError) as exc:
         passkey.authenticate_complete(
@@ -332,7 +352,7 @@ def test_authenticate_complete_rejects_inactive_user(
         sign_count=0,
     )
     _stub_authenticate_verifier(monkeypatch)
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     with pytest.raises(AppError) as exc:
         passkey.authenticate_complete(
@@ -362,7 +382,7 @@ def test_authenticate_complete_propagates_assertion_failure(
         raise RuntimeError("signature mismatch")
 
     monkeypatch.setattr(passkey, "verify_authentication_response", _boom)
-    started = passkey.authenticate_begin(app_client_id=client_id)
+    started = passkey.authenticate_begin(db_session, app_client_id=client_id)
 
     with pytest.raises(AppError) as exc:
         passkey.authenticate_complete(

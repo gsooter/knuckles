@@ -58,27 +58,34 @@ def _stub_google(
         profile: Userinfo payload to return from ``_get_profile``.
         tokens: Token payload to return from ``_post_token``.
     """
+    # ``_post_token`` gained a ``config`` parameter when Decision #017
+    # threaded per-tenant credentials through. The stub accepts and
+    # ignores it.
     monkeypatch.setattr(
         google_oauth,
         "_post_token",
-        lambda code, redirect_uri: tokens
-        or {
-            "access_token": "google-access",
-            "refresh_token": "google-refresh",
-            "expires_in": 3600,
-        },
+        lambda _config, code, redirect_uri: (
+            tokens
+            or {
+                "access_token": "google-access",
+                "refresh_token": "google-refresh",
+                "expires_in": 3600,
+            }
+        ),
     )
     monkeypatch.setattr(
         google_oauth,
         "_get_profile",
-        lambda access_token: profile
-        or {
-            "sub": "google-sub-123",
-            "email": "user@example.com",
-            "email_verified": True,
-            "name": "User Example",
-            "picture": "https://example.com/avatar.png",
-        },
+        lambda access_token: (
+            profile
+            or {
+                "sub": "google-sub-123",
+                "email": "user@example.com",
+                "email_verified": True,
+                "name": "User Example",
+                "picture": "https://example.com/avatar.png",
+            }
+        ),
     )
 
 
@@ -89,6 +96,7 @@ def test_build_authorize_url_embeds_state_and_redirect(
     client_id = _register_client(db_session)
 
     result = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -116,6 +124,7 @@ def test_complete_creates_user_and_returns_token_pair(
     _stub_google(monkeypatch)
 
     issued = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -148,6 +157,7 @@ def test_complete_reuses_existing_user_by_provider_id(
     _stub_google(monkeypatch)
 
     issued = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -156,6 +166,7 @@ def test_complete_reuses_existing_user_by_provider_id(
     )
 
     second = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -177,6 +188,7 @@ def test_complete_links_to_existing_email(
     _stub_google(monkeypatch)
 
     issued = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -206,6 +218,7 @@ def test_complete_rejects_unverified_email(
     )
 
     issued = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )
@@ -249,6 +262,7 @@ def test_complete_rejects_state_for_wrong_app_client(
     _stub_google(monkeypatch)
 
     issued = google_oauth.build_authorize_url(
+        db_session,
         redirect_uri="http://localhost:3000/auth/google/callback",
         app_client_id=client_id,
     )

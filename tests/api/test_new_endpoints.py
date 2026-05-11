@@ -254,7 +254,7 @@ def strict_cors_app(
     monkeypatch.setattr(
         cors_mod.database,
         "get_session_factory",
-        lambda: (lambda: db_session),
+        lambda: lambda: db_session,
     )
     cors_mod.reset_cache()
     yield create_app()

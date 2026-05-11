@@ -751,3 +751,180 @@ work can pause cleanly between any two:
   valuable independent of the code license. MIT-licensing the code
   preserves adoption optionality without giving away the option to
   build a paid offering later.
+
+---
+
+### 017 — Tenant-Shaped Config Lives On `app_clients`, Encrypted At Rest
+
+**Date:** 2026-05-11
+**Status:** Decided (schema + decisions entry); service refactor pending
+
+**Decision:**
+Per-tenant configuration — Resend API key + from-address, Google
+OAuth client id/secret, Apple Services ID + team id + key id +
+private key, WebAuthn rp_id + rp_name + origin — moves out of
+process-global env vars and onto nullable columns of `app_clients`.
+Secret-bearing columns (`resend_api_key`, `google_oauth_client_secret`,
+`apple_oauth_private_key`) hold Fernet ciphertext at rest; the
+symmetric key lives in a new `KNUCKLES_SECRETS_KEY` env var so a
+database-only compromise (rogue backup, replica read access, accidental
+`pg_dump` checked into a wiki) yields no usable credentials. Non-secret
+columns (client ids, team id, key id, rp_id, rp_name, origin,
+from-address) hold plaintext.
+
+Service-layer code resolves each value as `app_client.<field> ??
+settings.<field>` — a NULL column inherits the operator-level env var.
+The env-var fallback is a **transition mechanism**: it retires once a
+second tenant is provisioned, and the operator-level env vars are
+removed from `Settings` at that point. The fallback is not a permanent
+dual-mode design.
+
+This is a documented exception to CLAUDE.md Rule 5 ("All configuration
+comes from environment variables"). The rule is preserved in spirit —
+configuration still arrives from outside source control — but extended
+in scope: tenant-shaped configuration arrives via the database (loaded
+out-of-band via the registration CLI), while Knuckles-operator
+configuration (DB URL, JWT signing key, state secret, secrets-encryption
+key) stays in env.
+
+**Rationale:**
+
+- **Brand isolation is the load-bearing requirement.** With config
+  global, every tenant's Google consent screen says "Knuckles wants
+  access to your Google account," every Apple sign-in says
+  "Continue to Knuckles," every magic-link email arrives from a
+  Knuckles-owned address. For a single-consumer deployment that's
+  fine; for a credible multi-tenant identity service it's a
+  non-starter. The proof that the current architecture is one column
+  short of working is that `app_client_id` is already plumbed through
+  every relevant service entrypoint — the data flow exists, just not
+  the storage.
+
+- **Env vars don't shard.** Adding a second tenant under the current
+  shape requires deploying a second Knuckles instance with a different
+  `.env`, which abandons the multi-tenant story Decision #003 paid
+  for.
+
+- **Fernet beats plaintext-in-DB for secret storage.** A bare-secret
+  column treats DB-read access as equivalent to env-read access, which
+  collapses two separate trust boundaries (operations: who can read
+  env; data: who can read tables) into one. Fernet with a key in env
+  keeps both boundaries — an attacker needs the DB *and* the env to
+  decrypt. The cryptography library is already a direct dependency
+  (used by PyJWT for RS256), so adding Fernet is zero new dependency
+  surface. AES-GCM via `cryptography.hazmat` is technically lighter
+  than Fernet's AES-CBC+HMAC, but Fernet's high-level API is the
+  right ergonomic for a column-level seam — no nonce management in
+  application code.
+
+- **Fallback retires on schedule, not forever.** The env-var fallback
+  is the cheapest way to ship the schema and service refactor without
+  forcing every existing tenant (Greenroom is the only one today) to
+  re-provision in lockstep. But a permanent dual-mode design has two
+  code paths to test, two failure modes to reason about, and a
+  CLAUDE.md rule that drifts further from reality every quarter.
+  Treating fallback as a migration tool with a sunset preserves the
+  test-and-document property.
+
+**Alternatives considered:**
+
+- **Status quo: env vars only, deploy Knuckles per tenant.**
+  Rejected. Decision #003 made multi-tenancy first-class; this would
+  walk that back.
+- **Plaintext columns, no encryption.** Rejected — see Fernet
+  argument above. The proposal that landed at this design originally
+  said "plaintext or Fernet, decide later," which is the kind of
+  decision that doesn't get revisited unless forced.
+- **External secrets manager (Vault / AWS Secrets Manager).**
+  Rejected for now. Adds a runtime dependency (network call to fetch
+  every secret on every service-layer entrypoint, or an aggressive
+  in-process cache that re-introduces stale-secret hazards), plus
+  operational weight (one more thing to provision, monitor, rotate
+  out-of-band). Fernet-in-DB gives the same compromise-isolation
+  property with zero new infrastructure. The seam being column-level
+  means swapping Fernet for a secrets-manager indirection later is a
+  single-module change.
+- **Encrypt all columns, not just secrets.** Rejected. The non-secret
+  columns (rp_id, origins, sender address, Google client_id) are
+  visible on every sign-in flow anyway — encryption adds operational
+  weight (one more reason to need the secrets key) for no security
+  benefit.
+- **Carry `resend_from_name` on the same migration.** Rejected.
+  Sender display name is a net-new feature (the current `EmailSender`
+  protocol passes the From string as a single value); bundling it
+  with a relocation diff makes the change harder to review. Ships
+  separately if and when it's needed.
+
+**Open question — WebAuthn rp_id immutability:**
+
+WebAuthn cryptographically binds `rp_id` into every credential at
+registration. Changing an app-client's `webauthn_rp_id` after a
+passkey has been registered against it invalidates that passkey:
+the browser will refuse to surface the credential on the next sign-in
+attempt because the relying-party id doesn't match. This needs an
+application-layer guardrail; the DB schema can't express it directly
+because `passkey_credentials` is user-scoped, not app-client-scoped
+(a single user can sign in through multiple app clients).
+
+Three candidate approaches, to be resolved before the service refactor
+lands:
+
+1. **Track `rp_id` on `passkey_credentials` at creation time.** Add
+   a column recording which rp_id the credential was registered
+   against. `configure_app_client.py` refuses to update
+   `webauthn_rp_id` if any passkey rows still reference the old
+   value. Most explicit; adds a column to a high-value table.
+2. **Scope passkeys to app-clients.** Add an `app_client_id` FK on
+   `passkey_credentials`. A user who signs in through both app A and
+   app B keeps separate passkey sets per app. Cleanest model, but
+   reshapes the data model in a way that affects the existing
+   passkey list/delete UX.
+3. **Document, do not enforce.** The CLI warns loudly on
+   `webauthn_rp_id` change; the consequence (broken passkeys) is the
+   tenant's problem to coordinate. Cheapest; weakest guardrail.
+
+Default recommendation: option (1). Option (2) is the right answer
+if a future feature needs per-app passkey scoping for reasons beyond
+this guardrail. Option (3) is acceptable only if the operator is
+also the only consuming-app maintainer in practice.
+
+**Consequences:**
+
+- New required env var: `KNUCKLES_SECRETS_KEY` — a 32-byte URL-safe
+  base64 string (generated by `cryptography.fernet.Fernet.generate_key()`).
+  Loss of this key permanently bricks every encrypted column; it must
+  be backed up out-of-band. Rotation requires re-encrypting every
+  affected row, which is a one-off CLI invocation.
+- New `knuckles.core.secrets` module wrapping Fernet load + encrypt +
+  decrypt. Column-level type decorator (`EncryptedText` SQLAlchemy
+  TypeDecorator) handles transparent encryption on write and
+  decryption on read so the service layer sees plaintext.
+- Migration `20260511_tenant_config` adds the columns. All NULL on
+  existing rows; no data backfill required at migration time.
+- Service refactor (separate PR): `services/email.py`,
+  `services/magic_link.py`, `services/google_oauth.py`,
+  `services/apple_oauth.py`, `services/passkey.py` swap
+  `settings.<field>` for `app_client.<field> ?? settings.<field>`.
+  ~6 functions touched; the bigger time sink is the test refactor
+  that replaces `monkeypatch.setattr(settings, ...)` with
+  AppClient-row fixtures.
+- New `scripts/configure_app_client.py` (or `--update` flag on the
+  existing `scripts/register_app_client.py`) sets / rotates the new
+  fields without re-issuing the client secret. Encrypts secret
+  fields on write.
+- Fallback retirement plan: when a second tenant is provisioned and
+  the greenroom-prod row is fully populated, the operator-level env
+  vars (`RESEND_API_KEY`, `GOOGLE_OAUTH_*`, `APPLE_OAUTH_*`,
+  `WEBAUTHN_*`) are removed from `Settings` and the service-layer
+  fallback expressions are simplified to plain `app_client.<field>`.
+  Tracked separately; do not ship the fallback as permanent
+  behavior.
+- CLAUDE.md "Environment Variables" section gains a paragraph
+  delineating Knuckles-operator config (env, required) from
+  per-tenant config (DB column on `app_clients`, populated via CLI).
+- Greenroom's parallel work: create Greenroom-owned Apple Services
+  ID, Greenroom-owned Google OAuth client (verified publisher →
+  "Greenroom" on the consent screen), Greenroom-verified Resend
+  sender. Hand credentials to the Knuckles operator for
+  population into the `greenroom-prod` row.
+

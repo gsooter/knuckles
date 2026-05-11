@@ -38,6 +38,7 @@ from knuckles.core.logging import get_logger
 from knuckles.core.observability import log_and_raise
 from knuckles.core.state_jwt import issue_state, verify_state
 from knuckles.data.models import OAuthProvider
+from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
 
@@ -67,7 +68,48 @@ class AppleAuthorizeStart:
     state: str
 
 
+@dataclass(frozen=True)
+class _AppleConfig:
+    """Resolved Apple OAuth configuration for one consuming app.
+
+    Reads each field from the ``app_clients`` row when set, falling
+    back to the operator-level env var per Decision #017. The
+    fallback exists so single-tenant deployments keep working until
+    every tenant has been provisioned with its own credentials; it
+    will retire when a second tenant ships.
+    """
+
+    client_id: str
+    team_id: str
+    key_id: str
+    private_key: str
+
+
+def _resolve_config(session: Session, app_client_id: str) -> _AppleConfig:
+    """Look up the tenant's Apple OAuth config, falling back to env.
+
+    Args:
+        session: Active SQLAlchemy session for the AppClient lookup.
+        app_client_id: ``app_clients.client_id`` of the caller.
+
+    Returns:
+        A :class:`_AppleConfig` populated from the per-tenant columns,
+        with operator env vars filling in any nulls.
+    """
+    settings = get_settings()
+    client = repo.get_app_client(session, app_client_id)
+    return _AppleConfig(
+        client_id=(client and client.apple_oauth_client_id)
+        or settings.apple_oauth_client_id,
+        team_id=(client and client.apple_oauth_team_id) or settings.apple_oauth_team_id,
+        key_id=(client and client.apple_oauth_key_id) or settings.apple_oauth_key_id,
+        private_key=(client and client.apple_oauth_private_key)
+        or settings.apple_oauth_private_key,
+    )
+
+
 def build_authorize_url(
+    session: Session,
     *,
     redirect_uri: str,
     app_client_id: str,
@@ -75,6 +117,8 @@ def build_authorize_url(
     """Mint a state JWT and assemble the Apple consent URL.
 
     Args:
+        session: Active SQLAlchemy session used to load the tenant's
+            Apple OAuth config from ``app_clients``.
         redirect_uri: Callback URL Apple should POST back to. Must be
             pre-registered with the Apple Services ID for the
             configured Knuckles client.
@@ -85,7 +129,7 @@ def build_authorize_url(
         An :class:`AppleAuthorizeStart` carrying the consent URL and
         the state JWT.
     """
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     state = issue_state(
         purpose=_STATE_PURPOSE,
         payload={
@@ -95,7 +139,7 @@ def build_authorize_url(
         ttl_seconds=_STATE_TTL_SECONDS,
     )
     params = {
-        "client_id": settings.apple_oauth_client_id,
+        "client_id": config.client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "response_mode": "form_post",
@@ -142,8 +186,9 @@ def complete(
     claims = _verify_state(state, app_client_id=app_client_id)
     redirect_uri = claims["redirect_uri"]
 
-    client_secret = _mint_client_secret()
-    apple_tokens = _post_token(code, redirect_uri, client_secret)
+    config = _resolve_config(session, app_client_id)
+    client_secret = _mint_client_secret(config)
+    apple_tokens = _post_token(config, code, redirect_uri, client_secret)
 
     id_token = apple_tokens.get("id_token")
     if not isinstance(id_token, str) or not id_token:
@@ -153,7 +198,7 @@ def complete(
             status_code=400,
         )
 
-    profile = _verify_id_token(id_token)
+    profile = _verify_id_token(config, id_token)
 
     email_verified = str(profile.get("email_verified", "")).lower() == "true"
     is_private_email = str(profile.get("is_private_email", "")).lower() == "true"
@@ -268,13 +313,18 @@ def _display_name(user_data: dict[str, Any] | None) -> str | None:
     return joined or None
 
 
-def _mint_client_secret() -> str:
+def _mint_client_secret(config: _AppleConfig) -> str:
     """Sign a short-lived ES256 client_secret JWT for Apple's token endpoint.
 
     Apple uses a rotating client secret signed with the team's
     private key (``.p8``). This helper signs the JWT with the
-    configured ``apple_oauth_private_key`` so the caller can pass the
-    result as the ``client_secret`` POST field.
+    tenant-resolved ``apple_oauth_private_key`` so the caller can
+    pass the result as the ``client_secret`` POST field.
+
+    Args:
+        config: Resolved Apple OAuth credentials for the calling
+            tenant — supplies the team id, key id, client id (as
+            ``sub``), and signing key.
 
     Returns:
         A signed JWT suitable as ``client_secret``.
@@ -283,20 +333,19 @@ def _mint_client_secret() -> str:
         AppError: With code ``APPLE_AUTH_FAILED`` if the key material
             is missing or malformed.
     """
-    settings = get_settings()
     now = datetime.now(tz=UTC)
     claims = {
-        "iss": settings.apple_oauth_team_id,
+        "iss": config.team_id,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=_CLIENT_SECRET_TTL_SECONDS)).timestamp()),
         "aud": _ISSUER,
-        "sub": settings.apple_oauth_client_id,
+        "sub": config.client_id,
     }
-    headers = {"kid": settings.apple_oauth_key_id, "alg": "ES256"}
+    headers = {"kid": config.key_id, "alg": "ES256"}
     try:
         return jwt.encode(
             claims,
-            settings.apple_oauth_private_key,
+            config.private_key,
             algorithm="ES256",
             headers=headers,
         )
@@ -308,10 +357,17 @@ def _mint_client_secret() -> str:
         ) from exc
 
 
-def _post_token(code: str, redirect_uri: str, client_secret: str) -> dict[str, Any]:
+def _post_token(
+    config: _AppleConfig,
+    code: str,
+    redirect_uri: str,
+    client_secret: str,
+) -> dict[str, Any]:
     """Exchange Apple's authorization code for tokens.
 
     Args:
+        config: Resolved Apple OAuth credentials — supplies the
+            ``client_id`` POST field.
         code: Authorization code from Apple's callback.
         redirect_uri: Same value passed to :func:`build_authorize_url`.
         client_secret: ES256 JWT from :func:`_mint_client_secret`.
@@ -323,12 +379,11 @@ def _post_token(code: str, redirect_uri: str, client_secret: str) -> dict[str, A
         AppError: With code ``APPLE_AUTH_FAILED`` on any non-200
             response or network failure.
     """
-    settings = get_settings()
     try:
         response = requests.post(
             _TOKEN_URL,
             data={
-                "client_id": settings.apple_oauth_client_id,
+                "client_id": config.client_id,
                 "client_secret": client_secret,
                 "code": code,
                 "grant_type": "authorization_code",
@@ -400,13 +455,15 @@ def _parse_oauth_error(response: requests.Response) -> tuple[str | None, str | N
     )
 
 
-def _verify_id_token(id_token: str) -> dict[str, Any]:
+def _verify_id_token(config: _AppleConfig, id_token: str) -> dict[str, Any]:
     """Verify Apple's id_token signature, issuer, and audience.
 
     Uses :class:`jwt.PyJWKClient` to fetch and cache Apple's public
     keys from :data:`_JWKS_URL`.
 
     Args:
+        config: Resolved Apple OAuth credentials — supplies the
+            expected audience (the tenant's Services ID).
         id_token: Apple id_token string from the token-exchange response.
 
     Returns:
@@ -416,7 +473,6 @@ def _verify_id_token(id_token: str) -> dict[str, Any]:
         AppError: With code ``APPLE_AUTH_FAILED`` on any verification
             failure (signature, issuer, audience, or expiry).
     """
-    settings = get_settings()
     try:
         jwks_client = jwt.PyJWKClient(_JWKS_URL)
         signing_key = jwks_client.get_signing_key_from_jwt(id_token)
@@ -425,7 +481,7 @@ def _verify_id_token(id_token: str) -> dict[str, Any]:
                 id_token,
                 signing_key.key,
                 algorithms=["RS256"],
-                audience=settings.apple_oauth_client_id,
+                audience=config.client_id,
                 issuer=_ISSUER,
             )
         )

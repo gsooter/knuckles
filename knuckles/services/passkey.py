@@ -89,16 +89,57 @@ class PasskeyAuthenticateStart:
     state: str
 
 
+@dataclass(frozen=True)
+class _WebAuthnConfig:
+    """Resolved WebAuthn relying-party config for one consuming app.
+
+    Per Decision #017, ``webauthn_rp_id`` is effectively immutable
+    once any passkey is registered against the tenant — changing it
+    invalidates every credential because the rp_id is bound into the
+    credential at creation time. The CLI guardrail in
+    ``scripts/configure_app_client.py`` is responsible for refusing
+    to swap this field.
+    """
+
+    rp_id: str
+    rp_name: str
+    origin: str
+
+
+def _resolve_config(session: Session, app_client_id: str) -> _WebAuthnConfig:
+    """Look up the tenant's WebAuthn config, falling back to env.
+
+    Args:
+        session: Active SQLAlchemy session for the AppClient lookup.
+        app_client_id: ``app_clients.client_id`` of the caller.
+
+    Returns:
+        A :class:`_WebAuthnConfig` populated from the per-tenant
+        columns, with operator env vars filling in any nulls.
+    """
+    settings = get_settings()
+    client = repo.get_app_client(session, app_client_id)
+    return _WebAuthnConfig(
+        rp_id=(client and client.webauthn_rp_id) or settings.webauthn_rp_id,
+        rp_name=(client and client.webauthn_rp_name) or settings.webauthn_rp_name,
+        origin=(client and client.webauthn_origin) or settings.webauthn_origin,
+    )
+
+
 def register_begin(
     session: Session,
     *,
     user_id: str,
+    app_client_id: str,
 ) -> PasskeyRegisterStart:
     """Mint registration options + state for an authenticated user.
 
     Args:
         session: Active SQLAlchemy session.
         user_id: UUID string of the signed-in user enrolling a passkey.
+        app_client_id: ``app_clients.client_id`` initiating the flow.
+            Determines which tenant's ``webauthn_rp_id`` and
+            ``webauthn_rp_name`` are used.
 
     Returns:
         A :class:`PasskeyRegisterStart` with the options dict and the
@@ -110,7 +151,7 @@ def register_begin(
     """
     import uuid
 
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     user_uuid = uuid.UUID(user_id)
     user = repo.get_user_by_id(session, user_uuid)
     if user is None:
@@ -126,8 +167,8 @@ def register_begin(
         for cred in existing
     ]
     options = generate_registration_options(
-        rp_id=settings.webauthn_rp_id,
-        rp_name=settings.webauthn_rp_name,
+        rp_id=config.rp_id,
+        rp_name=config.rp_name,
         user_id=user_uuid.bytes,
         user_name=user.email,
         user_display_name=user.display_name or user.email,
@@ -155,6 +196,7 @@ def register_complete(
     session: Session,
     *,
     user_id: str,
+    app_client_id: str,
     credential: dict[str, Any],
     state: str,
     name: str | None = None,
@@ -165,6 +207,10 @@ def register_complete(
         session: Active SQLAlchemy session.
         user_id: UUID string of the signed-in user — must match the
             ``user_id`` baked into ``state``.
+        app_client_id: ``app_clients.client_id`` of the caller. Must
+            match the value used at :func:`register_begin` so the
+            tenant's ``webauthn_rp_id`` / ``webauthn_origin`` are
+            consistent across the two-step ceremony.
         credential: The ``PublicKeyCredential`` JSON the browser
             produced from ``navigator.credentials.create()``.
         state: State JWT minted by :func:`register_begin`.
@@ -177,7 +223,7 @@ def register_complete(
         AppError: With code ``PASSKEY_REGISTRATION_FAILED`` for any
             state mismatch or attestation verification failure.
     """
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     claims = _verify_register_state(state, user_id=user_id)
     expected_challenge = base64url_to_bytes(claims["challenge"])
 
@@ -185,8 +231,8 @@ def register_complete(
         verified = verify_registration_response(
             credential=credential,
             expected_challenge=expected_challenge,
-            expected_rp_id=settings.webauthn_rp_id,
-            expected_origin=settings.webauthn_origin,
+            expected_rp_id=config.rp_id,
+            expected_origin=config.origin,
         )
     except Exception as exc:
         raise AppError(
@@ -210,7 +256,9 @@ def register_complete(
     return cred_id
 
 
-def authenticate_begin(*, app_client_id: str) -> PasskeyAuthenticateStart:
+def authenticate_begin(
+    session: Session, *, app_client_id: str
+) -> PasskeyAuthenticateStart:
     """Mint discoverable-credential authentication options.
 
     No ``allow_credentials`` list is sent: the browser surfaces every
@@ -219,15 +267,17 @@ def authenticate_begin(*, app_client_id: str) -> PasskeyAuthenticateStart:
     app can't be redeemed by another.
 
     Args:
+        session: Active SQLAlchemy session used to load the tenant's
+            WebAuthn config from ``app_clients``.
         app_client_id: ``app_clients.client_id`` initiating the flow.
 
     Returns:
         A :class:`PasskeyAuthenticateStart` with the options dict and
         the signed state JWT.
     """
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     options = generate_authentication_options(
-        rp_id=settings.webauthn_rp_id,
+        rp_id=config.rp_id,
         user_verification=UserVerificationRequirement.PREFERRED,
     )
     state = issue_state(
@@ -273,7 +323,7 @@ def authenticate_complete(
             assertion verification failure (signature, sign-count
             regression, origin/RP mismatch).
     """
-    settings = get_settings()
+    config = _resolve_config(session, app_client_id)
     claims = _verify_authenticate_state(state, app_client_id=app_client_id)
     expected_challenge = base64url_to_bytes(claims["challenge"])
 
@@ -303,8 +353,8 @@ def authenticate_complete(
         verified = verify_authentication_response(
             credential=credential,
             expected_challenge=expected_challenge,
-            expected_rp_id=settings.webauthn_rp_id,
-            expected_origin=settings.webauthn_origin,
+            expected_rp_id=config.rp_id,
+            expected_origin=config.origin,
             credential_public_key=base64url_to_bytes(stored.public_key),
             credential_current_sign_count=stored.sign_count,
         )
