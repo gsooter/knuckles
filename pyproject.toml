@@ -91,7 +91,6 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 implicit_reexport = true
 exclude = ["knuckles/migrations/"]
-disable_error_code = ["comparison-overlap", "list-item", "union-attr", "unused-ignore"]
 
 [[tool.mypy.overrides]]
 module = ["webauthn.*"]
@@ -109,7 +108,6 @@ omit = [
     "*/tests/*",
     "*/scripts/*",
     "*/migrations/*",
-    "*/app.py",
     "*/wsgi.py",
 ]
 

@@ -243,7 +243,7 @@ def _error_envelope(code: str, message: str) -> dict[str, Any]:
     return body
 
 
-def _add_cors_headers(response):  # type: ignore[no-untyped-def]
+def _add_cors_headers(response: Response) -> Response:
     """Attach CORS headers to every response.
 
     In permissive mode (``KNUCKLES_STRICT_CORS=false``, the default)
