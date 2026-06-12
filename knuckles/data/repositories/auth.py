@@ -604,6 +604,36 @@ def mark_refresh_token_used(session: Session, token: RefreshToken) -> RefreshTok
     return token
 
 
+def consume_refresh_token(session: Session, token: RefreshToken) -> bool:
+    """Atomically claim a refresh token for rotation.
+
+    Issues a conditional ``UPDATE ... WHERE used_at IS NULL`` so two
+    concurrent rotations of the same token admit exactly one winner —
+    the read-then-write pattern alone would let both racers pass the
+    reuse check under READ COMMITTED.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token: The refresh-token row to consume.
+
+    Returns:
+        True if this caller consumed the token; False if it was
+        already consumed (a concurrent or prior use).
+    """
+    now = datetime.now(tz=UTC)
+    stmt = (
+        update(RefreshToken)
+        .where(RefreshToken.id == token.id, RefreshToken.used_at.is_(None))
+        .values(used_at=now)
+    )
+    result = cast("CursorResult[object]", session.execute(stmt))
+    session.flush()
+    if int(result.rowcount or 0) == 1:
+        session.expire(token, ["used_at"])
+        return True
+    return False
+
+
 def revoke_all_refresh_tokens_for_user(session: Session, user_id: uuid.UUID) -> int:
     """Mark every still-active refresh token for a user as used.
 
