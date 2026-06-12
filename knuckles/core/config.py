@@ -34,6 +34,12 @@ class Settings(BaseSettings):
             ceremony-state JWTs (OAuth ``state``, passkey challenge
             wrappers). Deliberately separate from the RS256 signing key
             because state tokens never leave Knuckles.
+        knuckles_admin_token: Bearer token for the operator
+            provisioning API under ``/v1/admin/*``. Compared against
+            the ``X-Admin-Token`` request header in constant time.
+            Empty (the default) disables the admin surface entirely —
+            every admin route 404s as if it did not exist, so existing
+            deployments keep a zero admin attack surface.
         knuckles_secrets_key: Fernet key for encrypting per-tenant
             secret-bearing columns on ``app_clients`` (Resend API key,
             Google OAuth client secret, Apple OAuth private key). A
@@ -95,6 +101,9 @@ class Settings(BaseSettings):
 
     # Ceremony state
     knuckles_state_secret: str
+
+    # Operator provisioning API (empty disables the /v1/admin surface)
+    knuckles_admin_token: str = ""
 
     # Per-tenant secret encryption (Decision #017)
     knuckles_secrets_key: str = ""

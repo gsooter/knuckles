@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -391,6 +391,24 @@ def update_passkey_sign_count(
     return cred
 
 
+def count_passkeys(session: Session) -> int:
+    """Count every passkey credential row in the table.
+
+    Backs the ``webauthn_rp_id`` immutability guardrail: changing the
+    relying-party id invalidates each credential minted against the
+    prior value, so the admin surface refuses the change while any
+    rows exist (absent an explicit force).
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        Total number of ``passkey_credentials`` rows.
+    """
+    stmt = select(func.count()).select_from(PasskeyCredential)
+    return int(session.execute(stmt).scalar_one())
+
+
 def delete_passkey(session: Session, cred: PasskeyCredential) -> None:
     """Remove a passkey credential row.
 
@@ -484,6 +502,77 @@ def get_app_client(session: Session, client_id: str) -> AppClient | None:
         The ``AppClient`` or ``None`` if no row matches.
     """
     return session.get(AppClient, client_id)
+
+
+def list_app_clients(session: Session) -> list[AppClient]:
+    """Return every registered ``AppClient`` ordered by client id.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        All ``app_clients`` rows sorted by ``client_id`` (possibly
+        empty).
+    """
+    stmt = select(AppClient).order_by(AppClient.client_id)
+    return list(session.execute(stmt).scalars().all())
+
+
+def rotate_app_client_secret(
+    session: Session,
+    client_id: str,
+    *,
+    new_secret_hash: str,
+) -> AppClient | None:
+    """Replace the stored secret hash on an existing ``AppClient``.
+
+    Deliberately separate from :func:`update_app_client_config` — the
+    tenant-config allow-list must stay unable to touch
+    ``client_secret_hash``.
+
+    Args:
+        session: Active SQLAlchemy session.
+        client_id: Target ``app_clients.client_id``.
+        new_secret_hash: SHA-256 hex digest of the new plaintext
+            secret.
+
+    Returns:
+        The updated ``AppClient``, or ``None`` if no row matches.
+    """
+    client = session.get(AppClient, client_id)
+    if client is None:
+        return None
+    client.client_secret_hash = new_secret_hash
+    session.flush()
+    return client
+
+
+def set_app_client_origins(
+    session: Session,
+    client_id: str,
+    *,
+    allowed_origins: list[str],
+) -> AppClient | None:
+    """Replace the entire ``allowed_origins`` list on an ``AppClient``.
+
+    Like :func:`rotate_app_client_secret`, this is kept outside the
+    tenant-config allow-list on purpose — origins gate redirect-URL
+    trust and deserve their own explicit seam.
+
+    Args:
+        session: Active SQLAlchemy session.
+        client_id: Target ``app_clients.client_id``.
+        allowed_origins: The new complete list of allowed origins.
+
+    Returns:
+        The updated ``AppClient``, or ``None`` if no row matches.
+    """
+    client = session.get(AppClient, client_id)
+    if client is None:
+        return None
+    client.allowed_origins = list(allowed_origins)
+    session.flush()
+    return client
 
 
 # Set of attributes that ``update_app_client_config`` is allowed to set.

@@ -73,6 +73,7 @@ known-first-party = ["knuckles"]
 "knuckles/data/repositories/*.py" = ["TCH001", "TCH002", "TCH003"]
 "knuckles/core/auth.py" = ["TCH001", "TCH002", "TCH003", "UP047"]
 "knuckles/core/app_client_auth.py" = ["TCH001", "TCH002", "TCH003", "UP047"]
+"knuckles/core/admin_auth.py" = ["TCH001", "TCH002", "TCH003", "UP047"]
 "knuckles/services/*.py" = ["TCH001", "TCH002", "TCH003"]
 "knuckles/api/v1/*.py" = ["TCH001", "TCH002", "TCH003"]
 
