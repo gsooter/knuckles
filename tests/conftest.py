@@ -18,6 +18,7 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy.orm import Session
@@ -49,6 +50,7 @@ _TEST_ENV = {
     "KNUCKLES_ACCESS_TOKEN_TTL_SECONDS": "3600",
     "KNUCKLES_REFRESH_TOKEN_TTL_SECONDS": "2592000",
     "KNUCKLES_STATE_SECRET": "test-state-secret-with-enough-entropy-12345",
+    "KNUCKLES_SECRETS_KEY": Fernet.generate_key().decode("ascii"),
     "MAGIC_LINK_TTL_SECONDS": "900",
     "RESEND_API_KEY": "test-resend",
     "RESEND_FROM_EMAIL": "test@knuckles.test",
@@ -82,6 +84,24 @@ def _reset_signing_key_cache() -> Iterator[None]:
     reset_key_cache()
     yield
     reset_key_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_fernet_cache() -> Iterator[None]:
+    """Clear the cached Fernet singleton between tests.
+
+    Tests that monkeypatch ``KNUCKLES_SECRETS_KEY`` (e.g. to assert
+    the missing-key failure mode) would otherwise see the suite-wide
+    key loaded by an earlier test.
+
+    Yields:
+        None; teardown clears the cache again.
+    """
+    from knuckles.core.secrets import get_fernet
+
+    get_fernet.cache_clear()
+    yield
+    get_fernet.cache_clear()
 
 
 @pytest.fixture(autouse=True)
