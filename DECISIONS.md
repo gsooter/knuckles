@@ -928,3 +928,55 @@ also the only consuming-app maintainer in practice.
   sender. Hand credentials to the Knuckles operator for
   population into the `greenroom-prod` row.
 
+
+### 018 — Dual-Auth Routes Pin Token Audience; logout/all Is Tenant-Scoped
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** Every route that authenticates both the calling app
+(`X-Client-Id` + `X-Client-Secret`) and the user (bearer access token)
+— today `GET /v1/me` and `POST /v1/logout/all` — asserts that the
+token's `aud` claim equals the calling client's `client_id`, raising
+`INVALID_TOKEN` (401) on mismatch. Additionally,
+`POST /v1/logout/all` revokes only the refresh tokens the user holds
+**with the calling app client**, not across every tenant.
+
+The reuse-detection response (Decision #008) keeps its deliberately
+global blast radius: a re-presented consumed refresh token still
+revokes the user's sessions across every consuming app, because that
+path signals compromise rather than user intent.
+
+**Rationale:**
+Without audience pinning, any registered tenant holding a leaked
+access token minted for another tenant could read that user's profile
+or destroy their sessions — a confused-deputy hole that only opens
+once a second tenant exists, which is exactly when it's hardest to
+retrofit. A tenant's own tokens always carry its own `client_id` as
+`aud`, so the pin is invisible to correct integrations (Greenroom
+included; verified against its SDK call sites).
+
+Scoping logout/all is the right multi-tenant default: "sign out of
+all my devices" is something a user asks one app for; silently
+destroying their sessions in unrelated apps would be surprising and
+would let any single tenant grief a shared identity.
+
+**Alternatives considered:**
+- **Verify `aud` inside `verify_access_token` for all routes** —
+  rejected. Bearer-only routes (passkey register/list/delete) have no
+  client headers to compare against; their tenant context *is* the
+  verified `aud`. Pinning belongs where both identities are present.
+- **Keep logout/all global and document it** — rejected. The
+  cross-tenant revoke is a security response, not a user-facing
+  feature; conflating the two makes the blast radius of a UI button
+  equal to that of a compromise signal.
+
+**Consequences:**
+- `revoke_all_refresh_tokens_for_user` gains an optional
+  `app_client_id` filter; reuse detection passes none.
+- The route layer calls the new `tokens.revoke_all_sessions` service
+  function instead of reaching into the repository (which also fixes
+  a layering violation).
+- A future cross-tenant "sign out everywhere, everywhere" operation,
+  if ever wanted, must be a new deliberate endpoint with its own
+  DECISIONS entry.

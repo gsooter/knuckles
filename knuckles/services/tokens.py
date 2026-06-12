@@ -269,6 +269,40 @@ def _revoke_all_for_reuse(
     )
 
 
+def revoke_all_sessions(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+) -> int:
+    """Revoke every active refresh token a user holds with one app.
+
+    Backs the user-initiated "sign out of all devices" endpoint. The
+    revocation is scoped to the calling app client — a shared identity
+    signed in to two consuming apps keeps its other app's sessions.
+    The cross-tenant blanket revoke is reserved for the
+    reuse-detection security response.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user signing out.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+
+    Returns:
+        Number of refresh tokens revoked.
+    """
+    revoked = repo.revoke_all_refresh_tokens_for_user(
+        session, user_id, app_client_id=app_client_id
+    )
+    _audit.info(
+        "logout_all user_id=%s app_client_id=%s tokens_revoked=%d",
+        user_id,
+        app_client_id,
+        revoked,
+    )
+    return revoked
+
+
 def revoke_refresh_token(
     session: Session,
     *,

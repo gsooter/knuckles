@@ -25,10 +25,14 @@ from flask.wrappers import Response
 from knuckles.api.v1 import api_v1
 from knuckles.core import database
 from knuckles.core.app_client_auth import get_current_app_client, require_app_client
-from knuckles.core.auth import get_current_user_id, get_token_claims, require_auth
-from knuckles.core.exceptions import USER_NOT_FOUND, NotFoundError, ValidationError
-from knuckles.data.repositories import auth as repo
-from knuckles.services import tokens
+from knuckles.core.auth import (
+    assert_token_audience,
+    get_current_user_id,
+    get_token_claims,
+    require_auth,
+)
+from knuckles.core.exceptions import ValidationError
+from knuckles.services import tokens, users
 
 
 def _require_refresh_token_field() -> str:
@@ -116,14 +120,25 @@ def logout_all_route() -> tuple[Response, int]:
     Useful for "sign out of all devices" UI and for users responding
     to a suspected credential leak. Requires both client headers (so
     we know who is calling) and a bearer access token (so we know
-    which user to revoke).
+    which user to revoke). Revocation is scoped to the calling app
+    client; sessions with other consuming apps are untouched.
 
     Returns:
         Tuple of JSON body carrying the revoked count and HTTP 200.
+
+    Raises:
+        UnauthorizedError: With code ``INVALID_TOKEN`` when the bearer
+            token was minted for a different app client.
     """
+    app_client = get_current_app_client()
+    assert_token_audience(app_client.client_id)
     user_id = get_current_user_id()
     session = database.get_db()
-    revoked = repo.revoke_all_refresh_tokens_for_user(session, user_id)
+    revoked = tokens.revoke_all_sessions(
+        session,
+        user_id=user_id,
+        app_client_id=app_client.client_id,
+    )
     return jsonify({"data": {"revoked": revoked}}), 200
 
 
@@ -140,12 +155,13 @@ def me_route() -> tuple[Response, int]:
     Raises:
         AppError: With code ``USER_NOT_FOUND`` if the token's subject
             no longer exists (e.g., the user was deleted mid-session).
+        UnauthorizedError: With code ``INVALID_TOKEN`` when the bearer
+            token was minted for a different app client.
     """
+    assert_token_audience(get_current_app_client().client_id)
     user_id = get_current_user_id()
     session = database.get_db()
-    user = repo.get_user_by_id(session, user_id)
-    if user is None:
-        raise NotFoundError(code=USER_NOT_FOUND, message="User not found.")
+    user = users.require_user(session, user_id)
 
     claims = get_token_claims()
     body: dict[str, Any] = {

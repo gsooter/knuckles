@@ -634,16 +634,27 @@ def consume_refresh_token(session: Session, token: RefreshToken) -> bool:
     return False
 
 
-def revoke_all_refresh_tokens_for_user(session: Session, user_id: uuid.UUID) -> int:
+def revoke_all_refresh_tokens_for_user(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    app_client_id: str | None = None,
+) -> int:
     """Mark every still-active refresh token for a user as used.
 
-    Used as the reuse-detection response: once a consumed refresh
-    token is re-presented, every outstanding token for the user is
-    invalidated so the attacker's copy cannot rotate again.
+    Two callers, two scopes:
+
+    * Reuse detection passes no ``app_client_id`` — a re-presented
+      consumed token is a compromise signal, so every session across
+      every consuming app is revoked (Decision #008).
+    * User-initiated "sign out everywhere" passes the calling client
+      so one tenant cannot destroy the user's sessions in another.
 
     Args:
         session: Active SQLAlchemy session.
         user_id: UUID of the user whose tokens should be revoked.
+        app_client_id: When given, restrict the revocation to tokens
+            issued for this app client.
 
     Returns:
         Number of rows revoked.
@@ -654,6 +665,8 @@ def revoke_all_refresh_tokens_for_user(session: Session, user_id: uuid.UUID) -> 
         .where(RefreshToken.user_id == user_id, RefreshToken.used_at.is_(None))
         .values(used_at=now)
     )
+    if app_client_id is not None:
+        stmt = stmt.where(RefreshToken.app_client_id == app_client_id)
     result = cast("CursorResult[object]", session.execute(stmt))
     session.flush()
     return int(result.rowcount or 0)
