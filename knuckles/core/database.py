@@ -77,17 +77,24 @@ def get_engine() -> Engine:
     )
 
 
+_session_factory: sessionmaker[Session] | None = None
+
+
 def get_session_factory() -> sessionmaker[Session]:
-    """Create a ``sessionmaker`` bound to the application engine.
+    """Return the application sessionmaker, building one if needed.
+
+    Reuses the factory (and its pooled engine) created by
+    :func:`init_db` when available so out-of-request callers (the
+    strict-CORS cache refresh) don't construct a fresh engine — and a
+    fresh Postgres connection — on every invocation.
 
     Returns:
         A ``sessionmaker`` configured with ``expire_on_commit=False``.
     """
+    if _session_factory is not None:
+        return _session_factory
     engine = get_engine()
     return sessionmaker(bind=engine, expire_on_commit=False)
-
-
-_session_factory: sessionmaker[Session] | None = None
 
 
 def init_db(app: Flask) -> None:
@@ -97,15 +104,52 @@ def init_db(app: Flask) -> None:
         app: The Flask application instance.
     """
     global _session_factory
-    _session_factory = get_session_factory()
+    engine = get_engine()
+    _session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    app.after_request(_commit_session)
     app.teardown_appcontext(_teardown_session)
+
+
+def _commit_session(response: object) -> object:
+    """Commit the request-scoped session before the response is sent.
+
+    Registered as an ``after_request`` hook so a failed commit becomes
+    a 500 the caller actually sees — committing in app-context
+    teardown happens after the response status has already gone out,
+    which can acknowledge writes that never landed (e.g. a refresh
+    token the client received but that doesn't exist server-side).
+
+    Runs for handled-error responses too: the reuse-detection
+    revocation and its audit log must persist even though the request
+    itself returns 401.
+
+    Args:
+        response: The outgoing response object (passed through).
+
+    Returns:
+        The same response object.
+
+    Raises:
+        Exception: Whatever the commit raised, after rolling back, so
+            Flask's error handling converts it to a 500.
+    """
+    session: Session | None = g.get("db_session")
+    if session is not None:
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+    return response
 
 
 def _teardown_session(exception: BaseException | None) -> None:
     """Close the request-scoped DB session.
 
-    Rolls back on exception, commits otherwise. Called automatically by
-    Flask at the end of each request.
+    The happy-path commit already ran in :func:`_commit_session`;
+    this hook rolls back whatever is left when the request died with
+    an unhandled exception (Flask skips ``after_request`` hooks in
+    that case) and always closes the session.
 
     Args:
         exception: The exception raised during the request, if any.

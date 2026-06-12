@@ -544,6 +544,26 @@ def update_app_client_config(
     return client
 
 
+def ping(session: Session) -> bool:
+    """Execute a trivial query to prove database connectivity.
+
+    Backs the deep ``/health`` probe: a worker whose pool is exhausted
+    or whose database is down should report degraded instead of green.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        True when the round trip succeeds.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: Propagated when the database
+            is unreachable.
+    """
+    session.execute(select(1))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Refresh tokens
 # ---------------------------------------------------------------------------

@@ -13,18 +13,25 @@ import re
 import pytest
 from flask import Flask, jsonify
 from flask.testing import FlaskClient
+from sqlalchemy.orm import Session
 
+import knuckles.core.database as database_mod
 from knuckles.app import create_app
 from knuckles.core.exceptions import ValidationError
 
 
 @pytest.fixture
-def app() -> Flask:
+def app(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> Flask:
     """Build an app with one extra route that intentionally raises.
+
+    Args:
+        db_session: The SQLite-backed SQLAlchemy session fixture.
+        monkeypatch: pytest's monkeypatch helper.
 
     Returns:
         A Flask app instance with a ``/_boom`` route registered.
     """
+    monkeypatch.setattr(database_mod, "get_db", lambda: db_session)
     app = create_app()
 
     @app.route("/_boom")
@@ -125,3 +132,23 @@ def test_jsonify_response_too(app: Flask, client: FlaskClient) -> None:
 
     response = client.get("/_ok")
     assert response.headers.get("X-Request-Id") is not None
+
+
+def test_request_context_includes_authenticated_user_id(app: Flask) -> None:
+    """``request_context`` surfaces the id ``require_auth`` stores.
+
+    Regression test: the helper used to read ``g.user_id`` while the
+    decorator sets ``g.current_user_id``, so user ids never appeared
+    in error or audit logs.
+    """
+    import uuid
+
+    from flask import g
+
+    from knuckles.core.observability import request_context
+
+    user_id = uuid.uuid4()
+    with app.test_request_context("/v1/me"):
+        g.current_user_id = user_id
+        ctx = request_context()
+    assert ctx["user_id"] == str(user_id)
