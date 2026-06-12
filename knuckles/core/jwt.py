@@ -43,6 +43,12 @@ from knuckles.core.exceptions import (
 
 _ALGORITHM = "RS256"
 
+# Tolerated clock drift between Knuckles and validators when checking
+# exp/iat. 60s is the OIDC-ecosystem convention: small enough not to
+# meaningfully extend token lifetime, large enough to absorb real-world
+# NTP drift on consumer hardware.
+_CLOCK_SKEW_LEEWAY_SECONDS = 60
+
 
 @functools.lru_cache(maxsize=1)
 def get_signing_key() -> rsa.RSAPrivateKey:
@@ -134,7 +140,9 @@ def verify_access_token(token: str) -> dict[str, Any]:
 
     Knuckles accepts tokens issued for any registered ``app_client``
     (audience check is deferred to the route handler which knows what
-    audience it wants).
+    audience it wants — dual-auth routes pin it via
+    ``assert_token_audience``). A 60-second leeway absorbs clock skew
+    between Knuckles replicas and callers' machines.
 
     Args:
         token: The bearer token value from an ``Authorization`` header.
@@ -154,6 +162,7 @@ def verify_access_token(token: str) -> dict[str, Any]:
             get_public_key(),
             algorithms=[_ALGORITHM],
             issuer=settings.knuckles_base_url,
+            leeway=_CLOCK_SKEW_LEEWAY_SECONDS,
             options={
                 "require": ["iss", "sub", "aud", "iat", "exp"],
                 "verify_aud": False,
