@@ -210,6 +210,7 @@ def create_magic_link_token(
     token_hash: str,
     expires_at: datetime,
     user_id: uuid.UUID | None = None,
+    app_client_id: str | None = None,
 ) -> MagicLinkToken:
     """Insert a pending magic-link token row.
 
@@ -220,6 +221,9 @@ def create_magic_link_token(
         expires_at: Hard expiry of the token.
         user_id: Optional user id — left ``None`` for first-time
             addresses and populated on redemption.
+        app_client_id: ``app_clients.client_id`` the link was issued
+            through; verification rejects redemption via any other
+            client (Decision #019).
 
     Returns:
         The newly created ``MagicLinkToken``.
@@ -229,6 +233,7 @@ def create_magic_link_token(
         token_hash=token_hash,
         expires_at=expires_at,
         user_id=user_id,
+        app_client_id=app_client_id,
     )
     session.add(token)
     session.flush()

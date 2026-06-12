@@ -186,7 +186,8 @@ Adding a route outside this list requires an entry in `DECISIONS.md`.
   `token_expires_at`, `scopes`, `raw_profile`, `created_at`,
   `updated_at`.
 - `magic_link_tokens` — `id`, `user_id`, `token_hash`, `email`,
-  `expires_at`, `used_at`, `created_at`.
+  `expires_at`, `used_at`, `app_client_id` (issuing tenant; verify
+  rejects cross-tenant redemption — Decision #019), `created_at`.
 - `passkey_credentials` — `id`, `user_id`, `credential_id`,
   `public_key`, `sign_count`, `created_at`.
 - `app_clients` — `id`, `app_name`, `client_secret_hash`,

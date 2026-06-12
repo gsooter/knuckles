@@ -192,6 +192,7 @@ def start_magic_link(
         email=email,
         token_hash=token_hash,
         expires_at=expires_at,
+        app_client_id=app_client_id,
     )
 
     app_client = repo.get_app_client(session, app_client_id)
@@ -242,13 +243,23 @@ def verify_magic_link(
         A matched :class:`~knuckles.services.tokens.TokenPair`.
 
     Raises:
-        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token, or
-            the owning user has been deactivated),
+        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token,
+            token issued through a different app client, or the
+            owning user has been deactivated),
             ``MAGIC_LINK_ALREADY_USED`` (already redeemed), or
             ``MAGIC_LINK_EXPIRED`` (past ``expires_at``).
     """
     row = repo.get_magic_link_by_hash(session, _hash_token(token))
     if row is None:
+        raise AppError(
+            code=MAGIC_LINK_INVALID,
+            message="Magic link is invalid.",
+            status_code=400,
+        )
+    if row.app_client_id is not None and row.app_client_id != app_client_id:
+        # The link belongs to a different tenant (Decision #019). A
+        # NULL means the row predates tenant scoping; those verify
+        # unscoped until their 15-minute TTL closes the window.
         raise AppError(
             code=MAGIC_LINK_INVALID,
             message="Magic link is invalid.",

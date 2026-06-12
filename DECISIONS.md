@@ -980,3 +980,36 @@ would let any single tenant grief a shared identity.
 - A future cross-tenant "sign out everywhere, everywhere" operation,
   if ever wanted, must be a new deliberate endpoint with its own
   DECISIONS entry.
+
+### 019 — Magic Links Are Bound To Their Issuing App Client
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** `magic_link_tokens` gains a nullable `app_client_id`
+FK recorded at mint time. `verify_magic_link` rejects redemption
+(`MAGIC_LINK_INVALID`) when the row's client differs from the
+verifying caller's. Rows with a NULL client (minted before this
+landed) verify unscoped until their 15-minute TTL expires, so no
+deploy coordination is needed.
+
+**Rationale:**
+The raw token is the email recipient's secret, but the verify
+endpoint issues a session for whatever `aud` the *calling client*
+asserts. Without binding, a link branded and origin-validated for
+tenant A could be redeemed through tenant B's client credentials,
+minting a tenant-B session — a confused-deputy path between tenants.
+The column also gives the cleanup script a per-tenant axis for free.
+
+**Alternatives considered:**
+- **Embed the client id in the token itself (signed)** — rejected.
+  Doubles the token format's complexity; the DB row already exists
+  and the hash lookup already happens on every verify.
+- **Make the column non-nullable with a backfill** — rejected.
+  Pending rows can't be attributed retroactively; a 15-minute TTL
+  makes the legacy window self-closing.
+
+**Consequences:**
+- CLAUDE.md's table list now records the column.
+- Greenroom is unaffected: it both mints and verifies through the
+  same client credentials.

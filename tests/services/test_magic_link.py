@@ -391,3 +391,56 @@ def test_verify_magic_link_rejects_inactive_user(
         magic_link.verify_magic_link(db_session, token=raw, app_client_id=client_id)
     assert exc.value.code == MAGIC_LINK_INVALID
     assert exc.value.status_code == 400
+
+
+def test_verify_magic_link_rejects_cross_tenant_redemption(
+    db_session: Session, email_sender: _FakeEmailSender
+) -> None:
+    """A link minted for tenant A cannot be redeemed through tenant B.
+
+    The token row records its issuing app client; a different client
+    presenting the raw token gets ``MAGIC_LINK_INVALID`` instead of a
+    session minted under its own audience (confused deputy).
+    """
+    client_a = _register_client(db_session)
+    repo.create_app_client(
+        db_session,
+        client_id="other-app",
+        app_name="Other App",
+        client_secret_hash="hash2",
+        allowed_origins=["http://localhost:4000"],
+    )
+
+    magic_link.start_magic_link(
+        db_session,
+        email="user@example.com",
+        app_client_id=client_a,
+        redirect_url="http://localhost:3000/auth/verify",
+        sender=email_sender,
+    )
+    raw = _extract_token(email_sender.sent[0][2])
+
+    with pytest.raises(AppError) as exc:
+        magic_link.verify_magic_link(db_session, token=raw, app_client_id="other-app")
+    assert exc.value.code == MAGIC_LINK_INVALID
+
+    # The issuing tenant can still redeem its own link.
+    pair = magic_link.verify_magic_link(db_session, token=raw, app_client_id=client_a)
+    assert pair.access_token
+
+
+def test_verify_magic_link_accepts_legacy_unscoped_rows(
+    db_session: Session,
+) -> None:
+    """Rows minted before tenant scoping (NULL client) still verify."""
+    client_id = _register_client(db_session)
+    raw = "legacy-raw-token"
+    repo.create_magic_link_token(
+        db_session,
+        email="legacy@example.com",
+        token_hash=hashlib.sha256(raw.encode("ascii")).hexdigest(),
+        expires_at=datetime.now(tz=UTC) + timedelta(minutes=10),
+    )
+
+    pair = magic_link.verify_magic_link(db_session, token=raw, app_client_id=client_id)
+    assert pair.access_token

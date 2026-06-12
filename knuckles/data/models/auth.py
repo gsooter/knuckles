@@ -186,6 +186,10 @@ class MagicLinkToken(TimestampMixin, Base):
         used_at: Timestamp the link was redeemed. ``None`` means
             still redeemable within the expiry window.
         user_id: Set once the link is redeemed.
+        app_client_id: The app client the link was issued through
+            (Decision #019). Verification rejects redemption through
+            any other client. ``None`` only on rows minted before
+            tenant scoping landed.
     """
 
     __tablename__ = "magic_link_tokens"
@@ -208,6 +212,12 @@ class MagicLinkToken(TimestampMixin, Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    app_client_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("app_clients.client_id", ondelete="CASCADE"),
         nullable=True,
         index=True,
     )
