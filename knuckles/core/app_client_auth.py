@@ -67,7 +67,12 @@ def require_app_client(view: Callable[_P, _T]) -> Callable[_P, _T]:
             raise UnauthorizedError(message="Unknown app-client.", code=INVALID_CLIENT)
 
         expected = client.client_secret_hash
-        provided = hashlib.sha256(client_secret.encode("ascii")).hexdigest()
+        # utf-8, not ascii: the header value is attacker-controlled, and
+        # an ascii encode raises on non-ASCII bytes — turning a wrong
+        # secret into a 500 that doubles as a client-id-exists oracle.
+        # Registered secrets are token_urlsafe output, so any non-ASCII
+        # input simply hashes to a mismatch and gets the clean 401.
+        provided = hashlib.sha256(client_secret.encode("utf-8")).hexdigest()
         if not hmac.compare_digest(expected, provided):
             raise UnauthorizedError(
                 message="Invalid app-client secret.", code=INVALID_CLIENT
