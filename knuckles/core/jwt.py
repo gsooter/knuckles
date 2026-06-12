@@ -135,6 +135,29 @@ def issue_access_token(
     )
 
 
+def _public_key_for_token(token: str) -> rsa.RSAPublicKey:
+    """Select the published public key matching a token's ``kid``.
+
+    Falls back to the active key when the header carries no ``kid``
+    or an unknown one — the signature check then fails with the
+    normal invalid-token path rather than a key-selection error.
+
+    Args:
+        token: The encoded JWT whose header names the signing key.
+
+    Returns:
+        The RSA public key to verify against.
+    """
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.InvalidTokenError:
+        return get_public_key()
+    for key_id, public_key in get_published_public_keys():
+        if key_id == kid:
+            return public_key
+    return get_public_key()
+
+
 def verify_access_token(token: str) -> dict[str, Any]:
     """Verify a Knuckles-issued access token and return its claims.
 
@@ -159,7 +182,7 @@ def verify_access_token(token: str) -> dict[str, Any]:
     try:
         claims: dict[str, Any] = jwt.decode(
             token,
-            get_public_key(),
+            _public_key_for_token(token),
             algorithms=[_ALGORITHM],
             issuer=settings.knuckles_base_url,
             leeway=_CLOCK_SKEW_LEEWAY_SECONDS,
@@ -215,20 +238,70 @@ def _public_key_to_jwk(*, kid: str, public_key: rsa.RSAPublicKey) -> dict[str, s
     }
 
 
+def _load_retired_public_key(pem_b64: str) -> rsa.RSAPublicKey:
+    """Decode one retired-key PEM into its RSA public key.
+
+    Accepts either a private-key PEM (the operator's previous
+    ``KNUCKLES_JWT_PRIVATE_KEY`` value, public half derived) or a
+    public-key PEM, both base64-wrapped like the active key.
+
+    Args:
+        pem_b64: Base64-encoded PEM of an RSA private or public key.
+
+    Returns:
+        The RSA public key.
+
+    Raises:
+        RuntimeError: If the PEM is not an RSA key of either kind.
+    """
+    pem_bytes = base64.b64decode(pem_b64)
+    try:
+        private = serialization.load_pem_private_key(pem_bytes, password=None)
+    except ValueError:
+        public = serialization.load_pem_public_key(pem_bytes)
+        if not isinstance(public, rsa.RSAPublicKey):
+            raise RuntimeError(
+                "KNUCKLES_JWT_RETIRED_KEYS entries must be RSA keys in PEM format.",
+            ) from None
+        return public
+    if not isinstance(private, rsa.RSAPrivateKey):
+        raise RuntimeError(
+            "KNUCKLES_JWT_RETIRED_KEYS entries must be RSA keys in PEM format.",
+        )
+    return private.public_key()
+
+
 def get_published_public_keys() -> list[tuple[str, rsa.RSAPublicKey]]:
     """Return every (kid, public key) pair the JWKS should publish.
 
-    Today this is just the active signing key. During a rotation the
-    list will include both the new and the previous key for the
-    ``KNUCKLES_ACCESS_TOKEN_TTL_SECONDS`` window so consuming apps can
-    validate tokens minted under either ``kid``. Wiring an additional
-    key is a one-line append to this function plus an env var.
+    The active signing key comes first, followed by every retired key
+    from ``KNUCKLES_JWT_RETIRED_KEYS`` (format ``kid:base64pem``,
+    comma-separated). Rotation flow: move the old key into the retired
+    list, set the new key as active, and keep the retired entry until
+    every token minted under it has expired — consuming apps select by
+    ``kid``, so no coordinated deploy is needed.
 
     Returns:
         A list of ``(kid, public_key)`` pairs, freshest first.
+
+    Raises:
+        RuntimeError: If a retired entry is malformed.
     """
     settings = get_settings()
-    return [(settings.knuckles_jwt_key_id, get_public_key())]
+    keys: list[tuple[str, rsa.RSAPublicKey]] = [
+        (settings.knuckles_jwt_key_id, get_public_key())
+    ]
+    for entry in settings.knuckles_jwt_retired_keys.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        kid, _, pem_b64 = entry.partition(":")
+        if not kid or not pem_b64:
+            raise RuntimeError(
+                "KNUCKLES_JWT_RETIRED_KEYS entries must look like 'kid:base64pem'.",
+            )
+        keys.append((kid, _load_retired_public_key(pem_b64)))
+    return keys
 
 
 def get_jwks() -> dict[str, list[dict[str, str]]]:

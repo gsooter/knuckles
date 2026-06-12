@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     knuckles_access_token_ttl_seconds: int = 3600
     knuckles_refresh_token_ttl_seconds: int = 30 * 24 * 3600
 
+    # Graceful signing-key rotation: comma-separated "kid:base64pem"
+    # entries for keys that no longer sign but whose outstanding tokens
+    # haven't expired. Each stays published in the JWKS and accepted by
+    # verify_access_token until removed. PEM may be the retired private
+    # key (its public half is derived) or the public key alone.
+    knuckles_jwt_retired_keys: str = ""
+
     # Ceremony state
     knuckles_state_secret: str
 
