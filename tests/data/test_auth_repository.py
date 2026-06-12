@@ -522,3 +522,43 @@ def test_oauth_provider_enum_rejects_music_services(db_session: Session) -> None
         OAuthProvider("apple_music")
     with pytest.raises(ValueError):
         OAuthProvider("tidal")
+
+
+def test_delete_expired_refresh_tokens_removes_only_expired_rows(
+    db_session: Session,
+) -> None:
+    """Expired refresh tokens are purged; live ones survive.
+
+    Reuse detection only needs consumed rows until ``expires_at``
+    passes (an expired token can never rotate), so deleting them
+    keeps the table bounded without weakening the guarantee.
+    """
+    user = repo.create_user(db_session, email="cleanup@example.com")
+    repo.create_app_client(
+        db_session,
+        client_id="cleanup-app",
+        app_name="Cleanup App",
+        client_secret_hash="hash",
+        allowed_origins=[],
+    )
+    now = datetime.now(tz=UTC)
+    expired = repo.create_refresh_token(
+        db_session,
+        user_id=user.id,
+        app_client_id="cleanup-app",
+        token_hash="a" * 64,
+        expires_at=now - timedelta(days=1),
+    )
+    live = repo.create_refresh_token(
+        db_session,
+        user_id=user.id,
+        app_client_id="cleanup-app",
+        token_hash="b" * 64,
+        expires_at=now + timedelta(days=1),
+    )
+
+    deleted = repo.delete_expired_refresh_tokens(db_session, older_than=now)
+
+    assert deleted == 1
+    assert repo.get_refresh_token_by_hash(db_session, expired.token_hash) is None
+    assert repo.get_refresh_token_by_hash(db_session, live.token_hash) is not None

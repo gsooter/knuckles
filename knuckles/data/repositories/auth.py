@@ -544,6 +544,27 @@ def update_app_client_config(
     return client
 
 
+def delete_expired_refresh_tokens(session: Session, *, older_than: datetime) -> int:
+    """Delete refresh-token rows whose ``expires_at`` is before a cutoff.
+
+    Consumed rows are retained only for reuse detection, and an
+    expired token can never rotate — so purging past-expiry rows
+    keeps the table bounded without weakening the reuse guarantee.
+
+    Args:
+        session: Active SQLAlchemy session.
+        older_than: Cutoff timestamp; rows expired before this are
+            deleted.
+
+    Returns:
+        The number of rows deleted.
+    """
+    stmt = delete(RefreshToken).where(RefreshToken.expires_at < older_than)
+    result = cast("CursorResult[object]", session.execute(stmt))
+    session.flush()
+    return int(result.rowcount or 0)
+
+
 def ping(session: Session) -> bool:
     """Execute a trivial query to prove database connectivity.
 
