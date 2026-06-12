@@ -329,9 +329,10 @@ def test_start_magic_link_null_columns_fall_back_to_env(
 ) -> None:
     """NULL tenant columns inherit the operator env credentials.
 
-    The service passes ``None`` for both values so the sender factory
-    applies its own env-var fallback — the documented transition
-    mechanism for the legacy single-tenant deployment.
+    The service resolves the env fallback itself (via the shared
+    tenant-config resolver) and hands the operator values to the
+    sender factory — the documented transition mechanism for the
+    legacy single-tenant deployment.
     """
     client_id = _register_client(db_session)
 
@@ -362,7 +363,7 @@ def test_start_magic_link_null_columns_fall_back_to_env(
         redirect_url="http://localhost:3000/auth/verify",
     )
 
-    assert factory_calls == [(None, None)]
+    assert factory_calls == [("test-resend", "test@knuckles.test")]
 
 
 def test_verify_magic_link_rejects_inactive_user(

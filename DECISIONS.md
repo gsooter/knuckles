@@ -1013,3 +1013,50 @@ The column also gives the cleanup script a per-tenant axis for free.
 - CLAUDE.md's table list now records the column.
 - Greenroom is unaffected: it both mints and verifies through the
   same client credentials.
+
+### 020 — Tenant Config Groups Resolve Atomically; Fallback Retirement Is A Flag
+
+**Date:** 2026-06-12
+**Status:** Decided (amends #017's resolution semantics)
+
+**Decision:** Per-tenant config resolution moves from four hand-rolled
+per-field `(client.X) or settings.X` expressions into one shared
+resolver (`knuckles/services/_tenant_config.py`) with two new rules:
+
+1. **Atomic groups.** Google OAuth (`client_id` + `client_secret`),
+   Apple OAuth (all four fields), and WebAuthn (`rp_id` + `origin`)
+   must be all-tenant or all-env. A partially configured group raises
+   `TENANT_CONFIG_INCOMPLETE` (500, new error code) at ceremony start
+   instead of silently pairing a tenant client id with the operator's
+   secret — a guaranteed provider-side failure that previously
+   surfaced as an opaque auth error at sign-in time. Resend stays
+   non-atomic (a tenant may override only its From address during the
+   transition), and `webauthn_rp_name` is cosmetic — defaulting to
+   the tenant's `app_name` when the tenant has its own RP, so the
+   operator's brand never appears on another tenant's passkey prompt.
+
+2. **Enforceable retirement.** `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK`
+   (default `true`) gates the env fallback. #017 promised the
+   fallback "retires once a second tenant is provisioned" but had no
+   mechanism; flipping this to `false` once every tenant row is
+   populated turns any residual NULL group into a loud error instead
+   of a silent run on the operator's (greenroom's) credentials.
+
+**Alternatives considered:**
+- **Refuse env fallback whenever an app_clients row exists** —
+  rejected. The row always exists (client auth loads it), so this
+  would break the legacy greenroom deployment outright.
+- **A `requires_own_config` column per tenant** — rejected for now.
+  A process-level flag matches the actual rollout (one legacy tenant,
+  then a hard cutover); a per-row flag can be added later if tenants
+  migrate one at a time.
+
+**Consequences:**
+- New error code `TENANT_CONFIG_INCOMPLETE` (HTTP 500) in the public
+  vocabulary; the dead `SERVICE_NOT_CONNECTED` constant is removed
+  from `exceptions.py` and `docs/openapi.yaml` in the same change.
+- Greenroom (all-NULL columns, flag at default) is unaffected.
+- The operator playbook for tenant #2: provision its row fully via
+  `configure_app_client.py`, populate greenroom's row, then set
+  `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK=false` and delete the
+  per-tenant env vars.

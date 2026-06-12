@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     webauthn_rp_name: str = "Knuckles"
     webauthn_origin: str = "http://localhost:3000"
 
+    # Per-tenant config fallback (Decision #017 / #020).
+    # When ``True`` (default), an app client whose tenant-config group
+    # is entirely NULL inherits the operator-level env vars above —
+    # the transition mechanism for the original single-tenant deploy.
+    # Flip to ``False`` once every tenant row is fully provisioned:
+    # from then on a NULL group is a loud TENANT_CONFIG_INCOMPLETE
+    # error instead of a silent run on another tenant's credentials.
+    knuckles_allow_env_tenant_fallback: bool = True
+
     # CORS
     # When ``False`` (default), Knuckles emits ``Access-Control-Allow-Origin: *``
     # — safe in practice because consuming apps proxy from their backend and

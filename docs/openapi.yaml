@@ -513,7 +513,7 @@ components:
                 - REFRESH_TOKEN_EXPIRED
                 - REFRESH_TOKEN_REUSED
                 - RATE_LIMITED
-                - SERVICE_NOT_CONNECTED
+                - TENANT_CONFIG_INCOMPLETE
                 - VALIDATION_ERROR
                 - UNAUTHORIZED
                 - FORBIDDEN

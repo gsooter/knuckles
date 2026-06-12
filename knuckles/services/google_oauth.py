@@ -34,6 +34,7 @@ from knuckles.data.models import OAuthProvider
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
+from knuckles.services._tenant_config import resolve_tenant_fields
 
 _logger = get_logger("services.google_oauth")
 
@@ -76,21 +77,36 @@ class _GoogleConfig:
 def _resolve_config(session: Session, app_client_id: str) -> _GoogleConfig:
     """Look up the tenant's Google OAuth client, falling back to env.
 
+    The two fields are an atomic group: a tenant that sets one must
+    set both, so a tenant client id never pairs with the operator's
+    client secret (see :mod:`knuckles.services._tenant_config`).
+
     Args:
         session: Active SQLAlchemy session for the AppClient lookup.
         app_client_id: ``app_clients.client_id`` of the caller.
 
     Returns:
         A :class:`_GoogleConfig` populated from the per-tenant columns,
-        with operator env vars filling in any nulls.
+        with operator env vars filling in a fully-NULL group.
+
+    Raises:
+        AppError: With code ``TENANT_CONFIG_INCOMPLETE`` when the
+            group is partially configured or the env fallback has
+            been retired.
     """
     settings = get_settings()
     client = repo.get_app_client(session, app_client_id)
+    resolved = resolve_tenant_fields(
+        client,
+        group="google_oauth",
+        fields={
+            "google_oauth_client_id": settings.google_oauth_client_id,
+            "google_oauth_client_secret": settings.google_oauth_client_secret,
+        },
+    )
     return _GoogleConfig(
-        client_id=(client and client.google_oauth_client_id)
-        or settings.google_oauth_client_id,
-        client_secret=(client and client.google_oauth_client_secret)
-        or settings.google_oauth_client_secret,
+        client_id=resolved["google_oauth_client_id"],
+        client_secret=resolved["google_oauth_client_secret"],
     )
 
 

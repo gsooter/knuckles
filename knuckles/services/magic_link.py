@@ -32,6 +32,7 @@ from knuckles.core.exceptions import (
 )
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
+from knuckles.services._tenant_config import resolve_tenant_fields
 from knuckles.services.email import EmailSender, get_default_sender
 
 
@@ -198,19 +199,23 @@ def start_magic_link(
     app_client = repo.get_app_client(session, app_client_id)
     app_name = app_client.app_name if app_client is not None else "your account"
 
-    # Per-tenant Resend credentials (Decision #017). Null columns mean
-    # "inherit from operator env var," which ``get_default_sender``
-    # already handles internally — passing through the ``or None`` so
-    # the fallback path stays a single concern.
-    tenant_api_key = app_client.resend_api_key if app_client is not None else None
-    tenant_from_address = (
-        app_client.resend_from_email if app_client is not None else None
+    # Per-tenant Resend credentials (Decision #017). The group is
+    # non-atomic: a tenant may override only its From address while
+    # the API key stays operator-global during the transition.
+    resolved = resolve_tenant_fields(
+        app_client,
+        group="resend",
+        fields={
+            "resend_api_key": settings.resend_api_key,
+            "resend_from_email": settings.resend_from_email,
+        },
+        atomic=False,
     )
 
     link = _build_link(redirect_url, raw_token)
     effective_sender = sender or get_default_sender(
-        api_key=tenant_api_key,
-        from_address=tenant_from_address,
+        api_key=resolved["resend_api_key"] or None,
+        from_address=resolved["resend_from_email"] or None,
     )
     effective_sender.send(
         to=email,
