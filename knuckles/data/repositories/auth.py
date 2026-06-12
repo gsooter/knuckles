@@ -13,6 +13,7 @@ from typing import cast
 
 from sqlalchemy import CursorResult, delete, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from knuckles.data.models import (
     AppClient,
@@ -542,6 +543,42 @@ def update_app_client_config(
         setattr(client, attr, value)
     session.flush()
     return client
+
+
+_ENCRYPTED_APP_CLIENT_COLUMNS = (
+    "resend_api_key",
+    "google_oauth_client_secret",
+    "apple_oauth_private_key",
+)
+
+
+def reencrypt_app_client_secrets(session: Session) -> int:
+    """Rewrite every populated encrypted column under the primary key.
+
+    Backs ``scripts/reencrypt_tenant_secrets.py`` (the Fernet rotation
+    promised by Decision #017). Reading an encrypted column decrypts
+    it with whichever key in the ``KNUCKLES_SECRETS_KEY`` list
+    matches; flagging the attribute dirty forces the next flush to
+    re-encrypt the plaintext with the list's primary (first) key.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        Number of ``app_clients`` rows that carried at least one
+        encrypted value and were rewritten.
+    """
+    rewritten = 0
+    for client in session.execute(select(AppClient)).scalars():
+        touched = False
+        for column in _ENCRYPTED_APP_CLIENT_COLUMNS:
+            if getattr(client, column):
+                flag_modified(client, column)
+                touched = True
+        if touched:
+            rewritten += 1
+    session.flush()
+    return rewritten
 
 
 def delete_expired_refresh_tokens(session: Session, *, older_than: datetime) -> int:

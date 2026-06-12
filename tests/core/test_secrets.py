@@ -180,3 +180,66 @@ class TestEncryptedTextColumn:
         with pytest.raises(StatementError) as excinfo:
             db_session.flush()
         assert isinstance(excinfo.value.orig, secrets.SecretsKeyNotConfiguredError)
+
+
+class TestKeyRotation:
+    """Comma-separated key lists enable in-place rotation."""
+
+    def test_old_key_ciphertext_decrypts_under_key_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A value written under the old key reads after rotation.
+
+        ``NEW,OLD`` decrypts with either key while encrypting new
+        writes under NEW only.
+        """
+        old_key = Fernet.generate_key().decode("ascii")
+        new_key = Fernet.generate_key().decode("ascii")
+
+        monkeypatch.setenv("KNUCKLES_SECRETS_KEY", old_key)
+        secrets.get_fernet.cache_clear()
+        ciphertext = secrets.encrypt("survives-rotation")
+
+        monkeypatch.setenv("KNUCKLES_SECRETS_KEY", f"{new_key},{old_key}")
+        secrets.get_fernet.cache_clear()
+        assert secrets.decrypt(ciphertext) == "survives-rotation"
+
+        fresh = secrets.encrypt("new-write")
+        assert (
+            Fernet(new_key.encode("ascii")).decrypt(fresh.encode("ascii"))
+            == b"new-write"
+        )
+
+    def test_reencrypt_rewrites_rows_under_primary_key(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The re-encrypt pass moves at-rest ciphertext to the new key."""
+        from knuckles.data.repositories import auth as repo
+
+        old_key = Fernet.generate_key().decode("ascii")
+        new_key = Fernet.generate_key().decode("ascii")
+
+        monkeypatch.setenv("KNUCKLES_SECRETS_KEY", old_key)
+        secrets.get_fernet.cache_clear()
+        client = _make_app_client(resend_api_key="re_rotated")
+        db_session.add(client)
+        db_session.flush()
+
+        monkeypatch.setenv("KNUCKLES_SECRETS_KEY", f"{new_key},{old_key}")
+        secrets.get_fernet.cache_clear()
+        rewritten = repo.reencrypt_app_client_secrets(db_session)
+        assert rewritten == 1
+
+        raw = (
+            db_session.connection()
+            .exec_driver_sql(
+                "SELECT resend_api_key FROM app_clients WHERE client_id = ?",
+                (client.client_id,),
+            )
+            .scalar_one()
+        )
+        # Decryptable by the NEW key alone — the old key is retired.
+        assert (
+            Fernet(new_key.encode("ascii")).decrypt(raw.encode("ascii"))
+            == b"re_rotated"
+        )
