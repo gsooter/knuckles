@@ -479,3 +479,25 @@ def test_logout_all_is_scoped_to_the_calling_tenant(
     other_hash = hashlib.sha256(pair_other.refresh_token.encode("ascii")).hexdigest()
     row = repo.get_refresh_token_by_hash(db_session, other_hash)
     assert row is not None and row.used_at is None
+
+
+def test_magic_link_rate_limit_carries_retry_after_header(
+    client: FlaskClient,
+    app_client_creds: tuple[str, str],
+) -> None:
+    """429 responses carry the Retry-After header errors.md promises."""
+    bucket = f"{app_client_creds[0]}:victim@example.com"
+    for _ in range(5):
+        assert magic_link_limiter.allow(bucket)
+
+    response = client.post(
+        "/v1/auth/magic-link/start",
+        json={
+            "email": "victim@example.com",
+            "redirect_url": "http://localhost:3000/auth/verify",
+        },
+        headers=_client_headers(app_client_creds),
+    )
+    assert response.status_code == 429
+    retry_after = response.headers.get("Retry-After")
+    assert retry_after is not None and int(retry_after) > 0

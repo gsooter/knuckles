@@ -116,7 +116,7 @@ fall through to a generic "auth failed" handler — don't crash.
 | `REFRESH_TOKEN_INVALID` | 401 | The refresh token doesn't match any row in `refresh_tokens`. | Re-authenticate the user. |
 | `REFRESH_TOKEN_EXPIRED` | 401 | The refresh token's 30-day window has elapsed. | Re-authenticate the user. |
 | `REFRESH_TOKEN_REUSED` | 401 | A refresh token was presented twice. **Knuckles has revoked every refresh token for this user as a security response.** | Sign the user out everywhere they had sessions; show "you've been signed out for security." |
-| `INVALID_GRANT` | 400 | The refresh token is structurally valid but was issued for a different `app_client_id`. | Verify the token was issued to your app. |
+| `INVALID_CLIENT` | 401 | Also returned when a refresh token is structurally valid but was issued for a different `app_client_id`. | Verify the token was issued to your app. |
 
 ### Magic-link
 
@@ -127,6 +127,7 @@ fall through to a generic "auth failed" handler — don't crash.
 | `MAGIC_LINK_ALREADY_USED` | 400 | The token already redeemed a session. | Same — request a fresh link. |
 | `EMAIL_DELIVERY_FAILED` | 502 | Resend rejected the send (unverified domain, malformed `from`, suspended account, etc.). | The error message contains Resend's reason. Most often: domain not verified in Resend, or `RESEND_FROM_EMAIL` doesn't match a verified domain. |
 | `RATE_LIMITED` | 429 | Per-email magic-link rate limit hit (default 5/hour/email). | Surface a friendly "try again in a few minutes" message; do not retry automatically. |
+| `TENANT_CONFIG_INCOMPLETE` | 500 | The app client's per-tenant config group (Google/Apple/WebAuthn/Resend) is partially configured, or the env fallback is disabled and a group is missing. | Operator action: populate the columns via `scripts/configure_app_client.py`. |
 
 ### OAuth (Google + Apple)
 

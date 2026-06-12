@@ -142,7 +142,9 @@ def _register_error_handlers(app: Flask) -> None:
     error_log = get_logger("errors")
 
     @app.errorhandler(AppError)
-    def handle_app_error(error: AppError) -> tuple[dict[str, Any], int]:
+    def handle_app_error(
+        error: AppError,
+    ) -> tuple[dict[str, Any], int, dict[str, str]]:
         """Log + return a standardized JSON body for a known ``AppError``.
 
         Every ``AppError`` is logged at WARNING with full request
@@ -153,7 +155,8 @@ def _register_error_handlers(app: Flask) -> None:
             error: The raised ``AppError`` instance.
 
         Returns:
-            Tuple of JSON error response and the error's HTTP status.
+            Tuple of JSON error response, the error's HTTP status, and
+            any extra headers the error carries (e.g. ``Retry-After``).
         """
         ctx = request_context()
         error_log.warning(
@@ -163,7 +166,11 @@ def _register_error_handlers(app: Flask) -> None:
             error.message,
             " ".join(f"{k}={v!r}" for k, v in ctx.items()),
         )
-        return _error_envelope(error.code, error.message), error.status_code
+        return (
+            _error_envelope(error.code, error.message),
+            error.status_code,
+            error.headers,
+        )
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException) -> tuple[dict[str, Any], int]:

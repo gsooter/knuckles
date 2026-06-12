@@ -77,10 +77,12 @@ def start_magic_link_route() -> tuple[Response, int]:
     # app-client so two apps' send budgets don't collide.
     bucket_key = f"{app_client.client_id}:{email.lower()}"
     if not magic_link_limiter.allow(bucket_key):
+        retry_after = magic_link_limiter.seconds_until_allowed(bucket_key)
         raise AppError(
             code=RATE_LIMITED,
             message="Too many magic-link requests for this email. Try again later.",
             status_code=429,
+            headers={"Retry-After": str(retry_after)},
         )
 
     session = database.get_db()

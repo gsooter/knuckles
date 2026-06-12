@@ -499,7 +499,6 @@ components:
                 - TOKEN_EXPIRED
                 - INVALID_CLIENT
                 - INVALID_SCOPE
-                - INVALID_GRANT
                 - USER_NOT_FOUND
                 - MAGIC_LINK_INVALID
                 - MAGIC_LINK_EXPIRED
