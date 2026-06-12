@@ -190,6 +190,13 @@ class MagicLinkToken(TimestampMixin, Base):
             (Decision #019). Verification rejects redemption through
             any other client. ``None`` only on rows minted before
             tenant scoping landed.
+        purpose: Ceremony the token belongs to — ``"sign_in"``
+            (default) or ``"email_change"``. Verification requires an
+            exact match so a token minted for one ceremony can never
+            be redeemed through another. Stored as a plain string
+            rather than a native PG enum (see migration
+            ``20260612_ml_purpose``) so adding a purpose never needs
+            an enum migration.
     """
 
     __tablename__ = "magic_link_tokens"
@@ -220,6 +227,12 @@ class MagicLinkToken(TimestampMixin, Base):
         ForeignKey("app_clients.client_id", ondelete="CASCADE"),
         nullable=True,
         index=True,
+    )
+    purpose: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="sign_in",
+        server_default="sign_in",
     )
 
     def __repr__(self) -> str:

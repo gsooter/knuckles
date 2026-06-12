@@ -1060,3 +1060,117 @@ resolver (`knuckles/services/_tenant_config.py`) with two new rules:
   `configure_app_client.py`, populate greenroom's row, then set
   `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK=false` and delete the
   per-tenant env vars.
+
+### 021 — Tenant Provisioning Moves Behind An Opt-In Admin API
+
+**Date:** 2026-06-12
+**Status:** Decided (refines #003's deferral of dynamic registration)
+
+**Decision:** Six routes under `/v1/admin/app-clients*` cover the full
+tenant lifecycle: create (secret shown exactly once), list, get,
+patch tenant config, rotate secret, replace allowed origins. The
+surface is gated by a single high-entropy `KNUCKLES_ADMIN_TOKEN`
+compared in constant time against the `X-Admin-Token` header — and
+when the env var is empty (the default), every admin route returns
+404 as if it did not exist, preserving the previous zero-admin-surface
+posture for any deployment that doesn't opt in. The operator scripts
+(`register_app_client.py`, `configure_app_client.py`) remain as
+break-glass wrappers over the same service functions, and gain
+`--rotate-secret` / `--set-origin` so secret rotation and origin
+changes no longer require hand-written SQL.
+
+Responses never contain decrypted secrets: encrypted columns surface
+only as `*_configured` booleans. The Decision #017 rp_id-immutability
+open question is now enforced in the service layer — changing
+`webauthn_rp_id` while passkeys exist is refused unless explicitly
+forced.
+
+**Alternatives considered:**
+- **Stay scripts-only** — rejected. "Self-service" cannot mean SSH;
+  the host (Railway) doesn't even guarantee shell access to the
+  running container.
+- **Per-operator admin identities** — rejected for now. One shared
+  token matches the single-operator reality; rotation is an env-var
+  change. Revisit if a second operator appears.
+- **OAuth 2.0 Dynamic Client Registration (RFC 7591)** — still
+  deferred; tenants are provisioned by the operator, not
+  self-registered by strangers.
+
+**Consequences:**
+- New optional env var `KNUCKLES_ADMIN_TOKEN`; CLAUDE.md's API list
+  gains the admin column.
+- The SDKs grow an `admin` namespace (Decision #015 obligation).
+- Audit log lines record every provisioning mutation (names only,
+  never secret material).
+
+### 022 — End-User Self-Service: Profile, Sessions, Providers, Deletion
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** Users get first-party control of their identity through
+the consuming app, via new dual-auth (client + bearer, aud-pinned)
+endpoints:
+
+- `PATCH /v1/me` — update / clear `display_name` and `avatar_url`
+  (previously NULL forever for magic-link-only users).
+- `DELETE /v1/me` — full account deletion: revokes every refresh
+  token across all tenants, purges magic-link rows for the email,
+  deletes the user row (FK cascades remove providers + passkeys).
+  This is the GDPR right-to-erasure path; previously erasure meant
+  manual DB surgery.
+- `GET /v1/sessions` + `DELETE /v1/sessions/<id>` — list and revoke
+  individual active sessions, scoped to the calling app client.
+  Session ids are refresh-token row ids and change on rotation; the
+  list is a point-in-time view.
+- `GET /v1/me/providers` + `DELETE /v1/me/providers/<provider>` —
+  see and unlink Google/Apple identities (including links created
+  silently by verified-email auto-matching). Provider tokens and raw
+  profiles are never exposed. No lockout guard is needed: magic-link
+  sign-in always remains available for the email.
+
+**Rationale:** Every consuming app would otherwise build these
+against raw tables it doesn't own. They are identity-shaped (not
+product-shaped), so they belong in Knuckles — and they are additive,
+so no existing consumer changes.
+
+**Consequences:**
+- New error codes `SESSION_NOT_FOUND`, `PROVIDER_NOT_FOUND`.
+- Account deletion is account-wide by design (an account spans
+  tenants); per-tenant "disconnect" is just `logout/all`.
+- SDK methods ship for every endpoint (Decision #015).
+
+### 023 — Email Change Is A Verified Two-Step Magic-Link Flow
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** `POST /v1/me/email/start` (client + bearer) mints a
+magic-link-style token bound to the authenticated user and the NEW
+address, recorded with `purpose='email_change'` on
+`magic_link_tokens` (new column, default `'sign_in'`), and emails the
+new address through the tenant's own sender. `POST /v1/me/email/verify`
+(client) consumes it: purpose, tenant, expiry, and single-use checks
+mirror sign-in verification; an address already on another account
+returns the new `EMAIL_IN_USE` (409). Sign-in verification now
+rejects any row whose purpose isn't `sign_in`, so an email-change
+token can never mint a session.
+
+Sessions are deliberately NOT revoked on change: outstanding access
+tokens carry the old email claim until their next refresh, and
+consuming apps must tolerate that staleness window (≤ access-token
+TTL).
+
+**Alternatives considered:**
+- **Carry the change in a state JWT instead of a row** — rejected;
+  single-use enforcement needs server state anyway, and the table,
+  hashing, TTL, and cleanup already exist.
+- **A native PG enum for purpose** — rejected; a plain string column
+  avoids the enum-migration footgun for a two-value vocabulary.
+
+**Consequences:**
+- CLAUDE.md's `magic_link_tokens` column list gains `purpose`.
+- Greenroom note: it keys users by `sub` and only writes email at
+  first provisioning, so a changed email reaches greenroom rows only
+  if greenroom adds an email-sync on authenticated requests —
+  optional, nothing breaks without it.

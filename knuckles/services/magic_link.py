@@ -1,13 +1,24 @@
-"""Magic-link ceremony: issue a one-time secret and redeem it for a session.
+"""Magic-link ceremonies: one-time email secrets for sign-in and email change.
 
-The flow has two service entry points:
+The sign-in flow has two service entry points:
 
 * :func:`start_magic_link` — mint a raw token, persist only its SHA-256
   digest, and send the recipient a link containing the raw token.
 * :func:`verify_magic_link` — hash the presented token, look the row
-  up, validate (not used, not expired), create the user if the email
-  is new, mark the row consumed, and return an access+refresh pair
-  via :func:`knuckles.services.tokens.issue_session`.
+  up, validate (purpose, tenant, not used, not expired), create the
+  user if the email is new, mark the row consumed, and return an
+  access+refresh pair via :func:`knuckles.services.tokens.issue_session`.
+
+The email-change flow reuses the same table and token mechanics with a
+``purpose="email_change"`` tag:
+
+* :func:`start_email_change` — mint a token bound to the current user
+  and the *new* address, and email the new address.
+* :func:`verify_email_change` — redeem the token, enforce email
+  uniqueness, and rewrite ``users.email``.
+
+Purposes are mutually exclusive at verify time — a token minted for
+one ceremony can never be redeemed through the other.
 
 The raw token is 32 bytes of ``secrets.token_urlsafe`` entropy. It
 lives in the outgoing email URL and in memory during verify — the DB
@@ -17,7 +28,9 @@ only ever sees the hash (Decision #006).
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
+import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
@@ -25,15 +38,23 @@ from sqlalchemy.orm import Session
 
 from knuckles.core.config import get_settings
 from knuckles.core.exceptions import (
+    EMAIL_IN_USE,
     MAGIC_LINK_ALREADY_USED,
     MAGIC_LINK_EXPIRED,
     MAGIC_LINK_INVALID,
     AppError,
 )
+from knuckles.data.models import AppClient, MagicLinkToken, User
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 from knuckles.services._tenant_config import resolve_tenant_fields
 from knuckles.services.email import EmailSender, get_default_sender
+
+_audit = logging.getLogger("knuckles.audit")
+
+# Magic-link ceremony tags persisted in ``magic_link_tokens.purpose``.
+PURPOSE_SIGN_IN = "sign_in"
+PURPOSE_EMAIL_CHANGE = "email_change"
 
 
 def _hash_token(token: str) -> str:
@@ -119,12 +140,12 @@ _EMAIL_TEMPLATE = f"""\
             </tr>
             <tr>
               <td style="{_BODY_CELL_STYLE}">
-                <p style="{_LEDE_STYLE}">Click the button below to sign in. This link expires in 15 minutes and can only be used once.</p>
+                <p style="{_LEDE_STYLE}">{{lede}}</p>
                 <table role="presentation" cellspacing="0" cellpadding="0"
                        border="0" width="100%">
                   <tr>
                     <td align="center" style="{_BUTTON_CELL_STYLE}">
-                      <a href="{{link}}" style="{_BUTTON_STYLE}">Sign in to {{app_name}}</a>
+                      <a href="{{link}}" style="{_BUTTON_STYLE}">{{action}}</a>
                     </td>
                   </tr>
                 </table>
@@ -146,20 +167,75 @@ _EMAIL_TEMPLATE = f"""\
 """  # noqa: E501
 
 
-def _render_email_body(link: str, app_name: str) -> str:
-    """Render the HTML body of the magic-link email.
+_SIGN_IN_LEDE = (
+    "Click the button below to sign in. This link expires in 15 minutes "
+    "and can only be used once."
+)
+_EMAIL_CHANGE_LEDE = (
+    "Click the button below to confirm your new email address. This link "
+    "expires in 15 minutes and can only be used once."
+)
+
+
+def _render_email_body(
+    link: str,
+    app_name: str,
+    *,
+    lede: str = _SIGN_IN_LEDE,
+    action: str | None = None,
+) -> str:
+    """Render the HTML body of a magic-link email.
 
     Args:
         link: The fully-assembled magic-link URL.
         app_name: Display name of the requesting app; rendered in the
-            email header and the call-to-action button so the recipient
-            sees consistent branding between the UI they started from
-            and the email they received.
+            email header so the recipient sees consistent branding
+            between the UI they started from and the email they
+            received.
+        lede: Lead paragraph above the button. Defaults to the
+            sign-in copy.
+        action: Button label. Defaults to ``"Sign in to {app_name}"``.
 
     Returns:
         HTML body content for the outgoing email.
     """
-    return _EMAIL_TEMPLATE.format(link=link, app_name=app_name)
+    return _EMAIL_TEMPLATE.format(
+        link=link,
+        app_name=app_name,
+        lede=lede,
+        action=action or f"Sign in to {app_name}",
+    )
+
+
+def _tenant_sender(app_client: AppClient | None) -> EmailSender:
+    """Resolve the email backend for one tenant (Decision #017).
+
+    The Resend group is non-atomic: a tenant may override only its
+    From address while the API key stays operator-global during the
+    transition.
+
+    Args:
+        app_client: The calling tenant's ``app_clients`` row, or
+            ``None`` for legacy callers.
+
+    Returns:
+        A concrete :class:`EmailSender` configured with the tenant's
+        resolved Resend credentials.
+    """
+    settings = get_settings()
+    resolved = resolve_tenant_fields(
+        app_client,
+        group="resend",
+        fields={
+            "resend_api_key": settings.resend_api_key,
+            "resend_from_email": settings.resend_from_email,
+        },
+        atomic=False,
+    )
+    return get_default_sender(
+        api_key=resolved["resend_api_key"] or None,
+        from_address=resolved["resend_from_email"] or None,
+    )
 
 
 def start_magic_link(
@@ -199,24 +275,8 @@ def start_magic_link(
     app_client = repo.get_app_client(session, app_client_id)
     app_name = app_client.app_name if app_client is not None else "your account"
 
-    # Per-tenant Resend credentials (Decision #017). The group is
-    # non-atomic: a tenant may override only its From address while
-    # the API key stays operator-global during the transition.
-    resolved = resolve_tenant_fields(
-        app_client,
-        group="resend",
-        fields={
-            "resend_api_key": settings.resend_api_key,
-            "resend_from_email": settings.resend_from_email,
-        },
-        atomic=False,
-    )
-
     link = _build_link(redirect_url, raw_token)
-    effective_sender = sender or get_default_sender(
-        api_key=resolved["resend_api_key"] or None,
-        from_address=resolved["resend_from_email"] or None,
-    )
+    effective_sender = sender or _tenant_sender(app_client)
     effective_sender.send(
         to=email,
         subject=f"Sign in to {app_name}",
@@ -225,37 +285,49 @@ def start_magic_link(
     )
 
 
-def verify_magic_link(
+def _load_redeemable_row(
     session: Session,
     *,
     token: str,
     app_client_id: str,
-    scopes: list[str] | None = None,
-) -> tokens.TokenPair:
-    """Redeem a magic-link token and mint a session for its user.
+    purpose: str,
+) -> MagicLinkToken:
+    """Look up a magic-link row and run the shared redemption checks.
 
-    On first verify for an unseen email the user row is created
-    implicitly — magic-link *is* the signup path.
+    Both ceremonies (sign-in and email change) funnel through this
+    helper so the validation rules live in exactly one place: the row
+    must exist, carry the expected ``purpose``, belong to the calling
+    tenant, be unredeemed, and be unexpired.
 
     Args:
         session: Active SQLAlchemy session.
         token: The raw token from the link the user clicked.
-        app_client_id: ``app_clients.client_id`` for whom the session
-            is being issued (becomes the JWT ``aud`` claim).
-        scopes: Optional scopes to embed in the issued access token.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+        purpose: Required ceremony tag (``"sign_in"`` or
+            ``"email_change"``). A mismatch is indistinguishable from
+            an unknown token by design.
 
     Returns:
-        A matched :class:`~knuckles.services.tokens.TokenPair`.
+        The validated, still-redeemable ``MagicLinkToken`` row.
 
     Raises:
         AppError: With code ``MAGIC_LINK_INVALID`` (unknown token,
-            token issued through a different app client, or the
-            owning user has been deactivated),
-            ``MAGIC_LINK_ALREADY_USED`` (already redeemed), or
-            ``MAGIC_LINK_EXPIRED`` (past ``expires_at``).
+            wrong ceremony purpose, or token issued through a
+            different app client), ``MAGIC_LINK_ALREADY_USED``
+            (already redeemed), or ``MAGIC_LINK_EXPIRED`` (past
+            ``expires_at``).
     """
     row = repo.get_magic_link_by_hash(session, _hash_token(token))
     if row is None:
+        raise AppError(
+            code=MAGIC_LINK_INVALID,
+            message="Magic link is invalid.",
+            status_code=400,
+        )
+    if row.purpose != purpose:
+        # A token minted for one ceremony must never redeem another —
+        # an email-change token redeemed as a sign-in would mint a
+        # session for a user that may not exist yet.
         raise AppError(
             code=MAGIC_LINK_INVALID,
             message="Magic link is invalid.",
@@ -285,6 +357,46 @@ def verify_magic_link(
             message="Magic link has expired.",
             status_code=400,
         )
+    return row
+
+
+def verify_magic_link(
+    session: Session,
+    *,
+    token: str,
+    app_client_id: str,
+    scopes: list[str] | None = None,
+) -> tokens.TokenPair:
+    """Redeem a magic-link token and mint a session for its user.
+
+    On first verify for an unseen email the user row is created
+    implicitly — magic-link *is* the signup path. Only rows minted
+    with ``purpose="sign_in"`` are accepted; an email-change token is
+    rejected as invalid.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token: The raw token from the link the user clicked.
+        app_client_id: ``app_clients.client_id`` for whom the session
+            is being issued (becomes the JWT ``aud`` claim).
+        scopes: Optional scopes to embed in the issued access token.
+
+    Returns:
+        A matched :class:`~knuckles.services.tokens.TokenPair`.
+
+    Raises:
+        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token,
+            non-sign-in purpose, token issued through a different app
+            client, or the owning user has been deactivated),
+            ``MAGIC_LINK_ALREADY_USED`` (already redeemed), or
+            ``MAGIC_LINK_EXPIRED`` (past ``expires_at``).
+    """
+    row = _load_redeemable_row(
+        session,
+        token=token,
+        app_client_id=app_client_id,
+        purpose=PURPOSE_SIGN_IN,
+    )
 
     user = repo.get_user_by_email(session, row.email)
     if user is not None and not user.is_active:
@@ -307,3 +419,137 @@ def verify_magic_link(
         scopes=scopes,
         email=user.email,
     )
+
+
+def start_email_change(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    new_email: str,
+    app_client_id: str,
+    redirect_url: str,
+    sender: EmailSender | None = None,
+) -> None:
+    """Mint an email-change token and deliver it to the new address.
+
+    The token row is bound at mint time to the requesting user and
+    tagged ``purpose="email_change"`` so it can never be redeemed as a
+    sign-in. Sending to the *new* address is the verification: only
+    someone with access to that inbox can complete the change.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the signed-in user requesting the change.
+        new_email: The address the account should move to. Uniqueness
+            is enforced at verify time, not here, so this call leaks
+            nothing about which addresses are registered.
+        app_client_id: ``app_clients.client_id`` of the requesting app
+            (the token can only be verified through the same tenant).
+        redirect_url: Verify endpoint on the consuming app. The raw
+            token is appended as a ``token=`` query string parameter.
+        sender: Optional email backend. Defaults to the tenant's
+            resolved Resend credentials.
+    """
+    settings = get_settings()
+    raw_token = _generate_token()
+    expires_at = datetime.now(tz=UTC) + timedelta(
+        seconds=settings.magic_link_ttl_seconds
+    )
+    repo.create_magic_link_token(
+        session,
+        email=new_email,
+        token_hash=_hash_token(raw_token),
+        expires_at=expires_at,
+        user_id=user_id,
+        app_client_id=app_client_id,
+        purpose=PURPOSE_EMAIL_CHANGE,
+    )
+
+    app_client = repo.get_app_client(session, app_client_id)
+    app_name = app_client.app_name if app_client is not None else "your account"
+
+    link = _build_link(redirect_url, raw_token)
+    effective_sender = sender or _tenant_sender(app_client)
+    effective_sender.send(
+        to=new_email,
+        subject=f"Confirm your new email for {app_name}",
+        body=_render_email_body(
+            link,
+            app_name,
+            lede=_EMAIL_CHANGE_LEDE,
+            action="Confirm new email",
+        ),
+        from_name=app_name,
+    )
+
+
+def verify_email_change(
+    session: Session,
+    *,
+    token: str,
+    app_client_id: str,
+) -> User:
+    """Redeem an email-change token and rewrite the user's email.
+
+    Sessions are deliberately **not** revoked: outstanding access
+    tokens carry the old email claim until their next refresh, and
+    consuming apps must tolerate that window. Revoking here would
+    punish the user for confirming their own change without closing
+    any real attack — the bearer of the link already controls the new
+    inbox.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token: The raw token from the confirmation link.
+        app_client_id: ``app_clients.client_id`` of the calling app;
+            must match the tenant the change was started through.
+
+    Returns:
+        The updated ``User`` with the new email applied.
+
+    Raises:
+        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token,
+            non-email-change purpose, different tenant, missing or
+            deactivated user), ``MAGIC_LINK_ALREADY_USED`` (already
+            redeemed), ``MAGIC_LINK_EXPIRED`` (past ``expires_at``),
+            or ``EMAIL_IN_USE`` (HTTP 409) when another account
+            already owns the new address.
+    """
+    row = _load_redeemable_row(
+        session,
+        token=token,
+        app_client_id=app_client_id,
+        purpose=PURPOSE_EMAIL_CHANGE,
+    )
+
+    if row.user_id is None:
+        raise AppError(
+            code=MAGIC_LINK_INVALID,
+            message="Magic link is invalid.",
+            status_code=400,
+        )
+    user = repo.get_user_by_id(session, row.user_id)
+    if user is None or not user.is_active:
+        raise AppError(
+            code=MAGIC_LINK_INVALID,
+            message="Magic link is invalid.",
+            status_code=400,
+        )
+
+    existing = repo.get_user_by_email(session, row.email)
+    if existing is not None and existing.id != user.id:
+        raise AppError(
+            code=EMAIL_IN_USE,
+            message="This email address is already in use.",
+            status_code=409,
+        )
+
+    repo.update_user_email(session, user, email=row.email)
+    repo.mark_magic_link_used(session, row, user_id=user.id)
+    # Deliberately no email addresses in the log line.
+    _audit.info(
+        "email_changed user_id=%s app_client_id=%s",
+        user.id,
+        app_client_id,
+    )
+    return user

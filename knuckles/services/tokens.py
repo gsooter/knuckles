@@ -38,9 +38,12 @@ from knuckles.core.exceptions import (
     REFRESH_TOKEN_EXPIRED,
     REFRESH_TOKEN_INVALID,
     REFRESH_TOKEN_REUSED,
+    SESSION_NOT_FOUND,
     AppError,
+    NotFoundError,
 )
 from knuckles.core.jwt import issue_access_token
+from knuckles.data.models import RefreshToken
 from knuckles.data.repositories import auth as repo
 
 _audit = logging.getLogger("knuckles.audit")
@@ -301,6 +304,77 @@ def revoke_all_sessions(
         revoked,
     )
     return revoked
+
+
+def list_sessions(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+) -> list[RefreshToken]:
+    """List a user's active sessions (refresh tokens) with one app.
+
+    Backs ``GET /v1/sessions``. The view is scoped to the calling app
+    client and is strictly point-in-time: rotation replaces refresh
+    rows, so every ``/v1/token/refresh`` retires one id and mints a
+    new one. Consumers must not treat the ids as stable handles.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the signed-in user.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+
+    Returns:
+        Active ``RefreshToken`` rows (``used_at IS NULL`` and not yet
+        expired), ordered by creation time.
+    """
+    return repo.list_active_refresh_tokens_for_user(
+        session,
+        user_id,
+        app_client_id=app_client_id,
+        now=datetime.now(tz=UTC),
+    )
+
+
+def revoke_session(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+    session_id: uuid.UUID,
+) -> None:
+    """Revoke one of the user's sessions by refresh-token row id.
+
+    Backs ``DELETE /v1/sessions/<id>``. The repository enforces the
+    ``(user_id, app_client_id)`` ownership scope, so a guessed or
+    captured id belonging to another user or tenant is
+    indistinguishable from an unknown one.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the signed-in user.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+        session_id: ``refresh_tokens.id`` of the session to revoke.
+
+    Raises:
+        NotFoundError: With code ``SESSION_NOT_FOUND`` when no active
+            session with that id is owned by this user and client —
+            including ids that are already consumed or expired.
+    """
+    revoked = repo.revoke_refresh_token_by_id(
+        session,
+        user_id=user_id,
+        app_client_id=app_client_id,
+        token_id=session_id,
+    )
+    if not revoked:
+        raise NotFoundError(code=SESSION_NOT_FOUND, message="Session not found.")
+    _audit.info(
+        "session_revoked user_id=%s app_client_id=%s session_id=%s",
+        user_id,
+        app_client_id,
+        session_id,
+    )
 
 
 def revoke_refresh_token(

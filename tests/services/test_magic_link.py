@@ -430,6 +430,34 @@ def test_verify_magic_link_rejects_cross_tenant_redemption(
     assert pair.access_token
 
 
+def test_verify_magic_link_rejects_email_change_purpose_token(
+    db_session: Session,
+) -> None:
+    """An email-change token cannot be redeemed as a sign-in.
+
+    Without the purpose check a stolen (or mis-routed) email-change
+    token would mint a session — for a user that may not even exist
+    yet at the new address.
+    """
+    client_id = _register_client(db_session)
+    user = repo.create_user(db_session, email="old@example.com")
+    raw = "email-change-raw-token"
+    repo.create_magic_link_token(
+        db_session,
+        email="new@example.com",
+        token_hash=hashlib.sha256(raw.encode("ascii")).hexdigest(),
+        expires_at=datetime.now(tz=UTC) + timedelta(minutes=10),
+        user_id=user.id,
+        app_client_id=client_id,
+        purpose="email_change",
+    )
+
+    with pytest.raises(AppError) as exc:
+        magic_link.verify_magic_link(db_session, token=raw, app_client_id=client_id)
+    assert exc.value.code == MAGIC_LINK_INVALID
+    assert repo.get_user_by_email(db_session, "new@example.com") is None
+
+
 def test_verify_magic_link_accepts_legacy_unscoped_rows(
     db_session: Session,
 ) -> None:

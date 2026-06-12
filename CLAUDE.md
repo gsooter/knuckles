@@ -114,21 +114,37 @@ knuckles/
 │   │   ├── logging.py           # Structured logging
 │   │   ├── jwt.py               # RS256 access tokens + JWKS
 │   │   ├── state_jwt.py         # HS256 ceremony-state tokens
-│   │   └── auth.py              # require_auth decorator
+│   │   ├── auth.py              # require_auth + audience pinning
+│   │   ├── app_client_auth.py   # require_app_client + origin checks
+│   │   ├── admin_auth.py        # require_admin (X-Admin-Token)
+│   │   ├── secrets.py           # Fernet EncryptedText (Decision #017)
+│   │   ├── rate_limit.py        # In-process sliding-window limiter
+│   │   ├── cors.py              # Strict-CORS origin cache
+│   │   └── observability.py     # Request-id correlation + log context
 │   ├── data/
 │   │   ├── models/
 │   │   │   └── auth.py          # Every Knuckles table lives here
 │   │   └── repositories/
 │   │       └── auth.py          # Every Knuckles query lives here
 │   ├── services/
+│   │   ├── magic_link.py        # Sign-in links + email-change flow
+│   │   ├── google_oauth.py
+│   │   ├── apple_oauth.py
+│   │   ├── passkey.py
+│   │   ├── tokens.py            # Access + refresh issuance, rotation
+│   │   ├── users.py             # Profile, providers, account deletion
+│   │   ├── app_clients.py       # Tenant provisioning (admin surface)
+│   │   ├── email.py             # EmailSender protocol + Resend
+│   │   └── _tenant_config.py    # Shared per-tenant config resolver
+│   ├── api/v1/
+│   │   ├── __init__.py          # Blueprint
+│   │   ├── auth.py              # /v1/token, /v1/logout*, /v1/me*
 │   │   ├── magic_link.py
 │   │   ├── google_oauth.py
 │   │   ├── apple_oauth.py
-│   │   ├── passkeys.py
-│   │   └── tokens.py            # Access + refresh issuance, rotation
-│   ├── api/v1/
-│   │   ├── __init__.py          # Blueprint
-│   │   └── auth.py              # All /v1/auth/* routes
+│   │   ├── passkey.py
+│   │   ├── sessions.py          # /v1/sessions (list + revoke one)
+│   │   └── admin.py             # /v1/admin/* (X-Admin-Token gated)
 │   └── migrations/              # Alembic
 └── tests/
     ├── core/
@@ -166,11 +182,36 @@ need `Authorization: Bearer <access_token>` (the **bearer** column).
 - `DELETE /v1/auth/passkey/<credential_id>` — bearer (delete one)
 - `POST /v1/token/refresh` — client
 - `POST /v1/logout` — client (revokes the presented refresh token)
-- `POST /v1/logout/all` — client + bearer (revokes every refresh token for the user)
+- `POST /v1/logout/all` — client + bearer (revokes the user's refresh
+  tokens **for the calling app client** — Decision #018)
 - `GET  /v1/me` — client + bearer
+- `PATCH /v1/me` — client + bearer (update display_name / avatar_url)
+- `DELETE /v1/me` — client + bearer (account deletion; Decision #022)
+- `GET  /v1/me/providers` — client + bearer (list linked OAuth providers)
+- `DELETE /v1/me/providers/<provider>` — client + bearer (unlink one)
+- `POST /v1/me/email/start` — client + bearer (begin verified email change)
+- `POST /v1/me/email/verify` — client (complete email change; Decision #023)
+- `GET  /v1/sessions` — client + bearer (active sessions with this app)
+- `DELETE /v1/sessions/<id>` — client + bearer (revoke one session)
 
-(The expired-magic-link cleanup is `scripts/cleanup_magic_links.py`,
-not an HTTP endpoint, so the admin attack surface stays at zero.)
+Dual-auth routes (client + bearer) additionally pin the token's `aud`
+to the calling `X-Client-Id` (Decision #018).
+
+Admin surface — exists only when `KNUCKLES_ADMIN_TOKEN` is set; every
+route 404s otherwise (Decision #021). Auth is the `X-Admin-Token`
+header (the **admin** column):
+
+- `POST /v1/admin/app-clients` — admin (returns the secret exactly once)
+- `GET  /v1/admin/app-clients` — admin
+- `GET  /v1/admin/app-clients/<client_id>` — admin
+- `PATCH /v1/admin/app-clients/<client_id>` — admin (tenant config)
+- `POST /v1/admin/app-clients/<client_id>/rotate-secret` — admin
+- `PUT  /v1/admin/app-clients/<client_id>/origins` — admin
+
+(Out-of-band maintenance lives in scripts, not HTTP:
+`scripts/cleanup_magic_links.py`, `scripts/cleanup_refresh_tokens.py`
+(schedule both via cron), and `scripts/reencrypt_tenant_secrets.py`
+for Fernet key rotation.)
 
 Adding a route outside this list requires an entry in `DECISIONS.md`.
 
@@ -187,11 +228,18 @@ Adding a route outside this list requires an entry in `DECISIONS.md`.
   `updated_at`.
 - `magic_link_tokens` — `id`, `user_id`, `token_hash`, `email`,
   `expires_at`, `used_at`, `app_client_id` (issuing tenant; verify
-  rejects cross-tenant redemption — Decision #019), `created_at`.
+  rejects cross-tenant redemption — Decision #019), `purpose`
+  (`sign_in` | `email_change` — Decision #023), `created_at`.
 - `passkey_credentials` — `id`, `user_id`, `credential_id`,
-  `public_key`, `sign_count`, `created_at`.
-- `app_clients` — `id`, `app_name`, `client_secret_hash`,
-  `allowed_origins`, `created_at`.
+  `public_key`, `sign_count`, `transports`, `name`, `last_used_at`,
+  `created_at`.
+- `app_clients` — `client_id` (PK), `app_name`, `client_secret_hash`,
+  `allowed_origins`, the Decision #017 per-tenant config columns
+  (`resend_api_key`*, `resend_from_email`, `google_oauth_client_id`,
+  `google_oauth_client_secret`*, `apple_oauth_client_id`,
+  `apple_oauth_team_id`, `apple_oauth_key_id`,
+  `apple_oauth_private_key`*, `webauthn_rp_id`, `webauthn_rp_name`,
+  `webauthn_origin` — `*` = Fernet-encrypted at rest), `created_at`.
 - `refresh_tokens` — `id`, `user_id`, `app_client_id`, `token_hash`,
   `expires_at`, `used_at`, `created_at`.
 
@@ -251,19 +299,35 @@ The app fails loudly at startup if a required variable is missing.
 
 Required at startup:
 - `DATABASE_URL`
-- `KNUCKLES_JWT_PRIVATE_KEY` (base64-encoded PEM)
+- `KNUCKLES_JWT_PRIVATE_KEY` (base64-encoded PEM; exercised at boot —
+  a malformed key crashes `create_app` instead of the first sign-in)
 - `KNUCKLES_JWT_KEY_ID`
 - `KNUCKLES_STATE_SECRET`
-- `KNUCKLES_SECRETS_KEY` (Fernet key for encrypted tenant-config
-  columns; generate with `Fernet.generate_key()`). Empty in dev means
-  encrypted columns refuse to read or write — loud failure rather
-  than silent plaintext.
+- `KNUCKLES_SECRETS_KEY` — required in production; empty in dev means
+  encrypted columns refuse to read or write (loud failure rather than
+  silent plaintext). Accepts a comma-separated ordered key list for
+  rotation: first key encrypts, all keys decrypt — see
+  `scripts/reencrypt_tenant_secrets.py`. Validated at boot when set.
+
+Operational, optional:
+- `KNUCKLES_ADMIN_TOKEN` — enables the `/v1/admin/*` provisioning
+  surface (Decision #021). Empty (default) = every admin route 404s.
+- `KNUCKLES_JWT_RETIRED_KEYS` — comma-separated `kid:base64pem`
+  entries kept in the JWKS and accepted on verification during a
+  signing-key rotation overlap window.
+- `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK` — `true` (default) lets a
+  NULL tenant-config group inherit the operator env vars below; set
+  `false` once every tenant row is provisioned to retire the fallback
+  (Decision #020).
+- `KNUCKLES_STRICT_CORS` — see Decision #013.
 
 Identity-path optional — these are the **operator-level fallback**
-values used when a per-tenant column on `app_clients` is NULL. New
-deployments should leave them empty and configure each tenant via
-`scripts/configure_app_client.py` instead; the fallback retires once
-a second tenant is provisioned (see Decision #017).
+values used when a per-tenant config group on `app_clients` is NULL.
+New deployments should leave them empty and configure each tenant via
+the admin API or `scripts/configure_app_client.py` instead; the
+fallback retires once a second tenant is provisioned (Decisions #017
+and #020 — groups resolve atomically, so a partially configured
+tenant fails loudly instead of mixing credentials).
 - `RESEND_API_KEY`, `RESEND_FROM_EMAIL`
 - `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`
 - `APPLE_OAUTH_CLIENT_ID`, `APPLE_OAUTH_TEAM_ID`,
@@ -271,11 +335,13 @@ a second tenant is provisioned (see Decision #017).
 - `WEBAUTHN_RP_ID`, `WEBAUTHN_RP_NAME`, `WEBAUTHN_ORIGIN`
 
 Per-tenant config lives on `app_clients` columns instead of env vars
-(Decision #017). Tenant-shaped fields — Resend sender, Google OAuth
-client, Apple OAuth credentials, WebAuthn relying party — are
-populated via `scripts/register_app_client.py` (new tenant) or
-`scripts/configure_app_client.py` (update / rotate). Secret-bearing
-columns (`resend_api_key`, `google_oauth_client_secret`,
+(Decision #017). A tenant is **created** with
+`scripts/register_app_client.py` (or `POST /v1/admin/app-clients`),
+then its tenant-shaped fields — Resend sender, Google OAuth client,
+Apple OAuth credentials, WebAuthn relying party — are **populated**
+via `scripts/configure_app_client.py` or
+`PATCH /v1/admin/app-clients/<id>`. Secret-bearing columns
+(`resend_api_key`, `google_oauth_client_secret`,
 `apple_oauth_private_key`) are encrypted at rest via the
 `EncryptedText` SQLAlchemy type decorator.
 
