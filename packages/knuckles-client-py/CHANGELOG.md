@@ -21,6 +21,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Nothing yet._
 
+## [0.1.2] — 2026-06-12
+
+### Added
+
+- **Account management** under the new `client.me` sub-client (still
+  callable — `client.me(access_token=...)` returns the `UserProfile`
+  exactly as before):
+  - `me.update_profile(access_token=, display_name=..., avatar_url=...)`
+    — `PATCH /v1/me`; only the fields you pass are sent, and an
+    explicit `None` clears the field server-side.
+  - `me.delete_account(access_token=)` — `DELETE /v1/me`.
+  - `me.list_providers(access_token=)` — `GET /v1/me/providers`.
+  - `me.unlink_provider(access_token=, provider=)` —
+    `DELETE /v1/me/providers/{provider}`.
+  - `me.start_email_change(access_token=, new_email=, redirect_url=)`
+    — `POST /v1/me/email/start`.
+  - `me.verify_email_change(token)` — `POST /v1/me/email/verify`
+    (client headers only).
+- **Sessions** sub-client: `sessions.list(access_token=)`
+  (`GET /v1/sessions`) and `sessions.revoke(access_token=, session_id=)`
+  (`DELETE /v1/sessions/{session_id}`).
+- **Admin** sub-client, active when the client is constructed with the
+  new keyword-only `admin_token=...`. Admin calls authenticate with
+  `X-Admin-Token` (app-client headers are not sent):
+  `admin.create_app_client`, `admin.list_app_clients`,
+  `admin.get_app_client`, `admin.update_app_client`,
+  `admin.rotate_secret`, `admin.set_origins`. Calling any admin method
+  without `admin_token` raises a clear `RuntimeError`.
+- `KnucklesTokenExpiredError` (subclass of `KnucklesTokenError`) —
+  raised by `verify_access_token` when the only problem is an expired
+  `exp`. The `__cause__` chain to the underlying
+  `jwt.ExpiredSignatureError` is part of the contract.
+- `KnucklesRateLimitError.retry_after` — whole-second retry hint
+  parsed from the `Retry-After` response header (`None` when absent
+  or in the unparsed HTTP-date form).
+- Keyword-only `jwks_headers` on `KnucklesClient` — extra HTTP headers
+  for the JWKS fetch. The `User-Agent` now defaults to
+  `knuckles-client-py/<version>` (urllib's stock UA is blocked by
+  common WAF rules), and the JWKS fetch carries an explicit 10s
+  timeout.
+
+### Compatibility
+
+- Fully backward compatible. `client.me` changed from a bound method
+  to a callable sub-client, but `client.me(access_token=...)` behaves
+  identically. The new account/session/admin methods return the
+  server's `data` payload as plain dicts. Account, session, and admin
+  endpoints require a Knuckles server that ships them; older servers
+  return 404.
+
 ## [0.1.1] — 2026-05-01
 
 ### Added

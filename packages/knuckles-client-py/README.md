@@ -101,13 +101,27 @@ new_pair = knuckles.refresh(pair.refresh_token)
 
 | Method | Returns | Notes |
 |---|---|---|
-| `client.verify_access_token(token)` | `dict[str, Any]` | Local. Raises `KnucklesTokenError` on any failure. |
+| `client.verify_access_token(token)` | `dict[str, Any]` | Local. Raises `KnucklesTokenExpiredError` on expiry, `KnucklesTokenError` on any other failure. |
 | `client.refresh(refresh_token)` | `TokenPair` | Always store the new refresh token from the response. |
 | `client.logout(refresh_token)` | `None` | Idempotent; unknown tokens succeed silently. |
 | `client.logout_all(access_token=...)` | `int` | Revokes every refresh token for the user. Returns count. |
 | `client.me(access_token=...)` | `UserProfile` | Current user's profile from `/v1/me`. |
 | `client.fetch_jwks()` | `dict[str, Any]` | Raw JWKS body, mostly for debugging. |
 | `client.fetch_openid_configuration()` | `dict[str, Any]` | Partial OIDC discovery doc. |
+| `client.me.update_profile(access_token=, display_name=..., avatar_url=...)` | `dict[str, Any]` | `PATCH /v1/me`. Sends only the fields you pass; explicit `None` clears. |
+| `client.me.delete_account(access_token=)` | `None` | Permanently deletes the account. |
+| `client.me.list_providers(access_token=)` | `list[dict[str, Any]]` | Linked OAuth providers (`provider`, `created_at`, `scopes`). |
+| `client.me.unlink_provider(access_token=, provider=)` | `None` | Unlinks `google` / `apple`. |
+| `client.me.start_email_change(access_token=, new_email=, redirect_url=)` | `None` | Emails a confirmation link to the new address. |
+| `client.me.verify_email_change(token)` | `dict[str, Any]` | Client-headers-only; applies the change, returns `{"email": ...}`. |
+| `client.sessions.list(access_token=)` | `list[dict[str, Any]]` | Active sessions (`id`, `created_at`, `expires_at`). |
+| `client.sessions.revoke(access_token=, session_id=)` | `None` | Revokes one session. |
+| `client.admin.create_app_client(client_id=, app_name=, allowed_origins=None)` | `dict[str, Any]` | Includes the one-time `client_secret`. Needs `admin_token`. |
+| `client.admin.list_app_clients()` | `list[dict[str, Any]]` | Needs `admin_token`. |
+| `client.admin.get_app_client(client_id)` | `dict[str, Any]` | Needs `admin_token`. |
+| `client.admin.update_app_client(client_id, **fields)` | `dict[str, Any]` | PATCH; kwargs pass through verbatim. Needs `admin_token`. |
+| `client.admin.rotate_secret(client_id)` | `dict[str, Any]` | Includes the new one-time `client_secret`. Needs `admin_token`. |
+| `client.admin.set_origins(client_id, allowed_origins)` | `dict[str, Any]` | Replaces the full origins list. Needs `admin_token`. |
 | `client.magic_link.start(email=, redirect_url=)` | `None` | Sends the email. May raise `KnucklesRateLimitError`. |
 | `client.magic_link.verify(token)` | `TokenPair` | Redeems the token from the email. |
 | `client.google.start(redirect_url=)` | `CeremonyStart` | Returns `authorize_url` + `state`. |
@@ -140,10 +154,19 @@ What the SDK does, in order:
    future.
 7. Returns the decoded claims dict.
 
-Any failure raises `KnucklesTokenError`. The SDK does *not*
-automatically refresh the token — that's a higher-level decision
-your app makes (you may want to refresh, or you may want to require
+Expiry raises `KnucklesTokenExpiredError` (a subclass of
+`KnucklesTokenError`, raised `from` the underlying
+`jwt.ExpiredSignatureError` — the `__cause__` chain is part of the
+contract); every other failure raises `KnucklesTokenError`. The SDK
+does *not* automatically refresh the token — that's a higher-level
+decision your app makes (you may want to refresh on
+`KnucklesTokenExpiredError` specifically, or require
 re-authentication).
+
+The JWKS fetch sends a `knuckles-client-py/<version>` User-Agent by
+default (urllib's stock UA gets blocked by common WAF rules) and uses
+a 10-second timeout. Override or extend the headers via the
+`jwks_headers` constructor option.
 
 ## Refresh-token rotation, in depth
 
@@ -192,13 +215,17 @@ def get_valid_access_token(session) -> str:
 KnucklesError                       # base for everything the SDK raises
 ├── KnucklesNetworkError            # transport failure / non-JSON response
 ├── KnucklesTokenError              # local JWKS verification failed
+│   └── KnucklesTokenExpiredError   # ...specifically because exp is past
 └── KnucklesAPIError                # Knuckles returned a typed error
     ├── KnucklesAuthError           # 401 / 403
     ├── KnucklesValidationError     # 422
-    └── KnucklesRateLimitError      # 429
+    └── KnucklesRateLimitError      # 429 (carries .retry_after)
 ```
 
 Every `KnucklesAPIError` carries `.code`, `.message`, `.status_code`.
+`KnucklesRateLimitError` additionally carries `.retry_after` — whole
+seconds parsed from the `Retry-After` response header, or `None` when
+the server didn't send it.
 Codes that warrant special handling:
 
 | Code | What it means | What to do |
@@ -223,6 +250,8 @@ KnucklesClient(
     client_secret: str,            # required
     timeout: float = 10,           # per-request HTTP timeout, seconds
     session: requests.Session | None = None,  # bring your own pool / proxy / retries
+    jwks_headers: dict[str, str] | None = None,  # extra headers on the JWKS fetch
+    admin_token: str | None = None,  # enables client.admin (X-Admin-Token)
 )
 ```
 
@@ -238,6 +267,14 @@ KnucklesClient(
 - **`session`** — pass in a pre-built `requests.Session` to add
   retries (`requests.adapters.HTTPAdapter`), proxies, custom CAs,
   observability hooks, etc.
+- **`jwks_headers`** — extra HTTP headers on the JWKS fetch. When you
+  don't supply a `User-Agent` the SDK defaults it to
+  `knuckles-client-py/<version>` so the fetch isn't rejected by WAF
+  rules that block urllib's stock UA.
+- **`admin_token`** — operator-only. When set, `client.admin.*`
+  methods authenticate with the `X-Admin-Token` header (app-client
+  headers are not sent on admin routes). Without it, every admin
+  method raises `RuntimeError`.
 
 ## Recipes
 
@@ -316,18 +353,19 @@ class KnucklesAuthMiddleware:
   upgrading minor versions; method signatures may change.
 - **1.0+ follows strict semver.** Breaking changes require a major
   version bump.
-- **Pin in production.** `knuckles-client==0.1.0` in your
+- **Pin in production.** `knuckles-client==0.1.2` in your
   requirements file is the right move at this stage.
 
 ## Compatibility matrix
 
 | `knuckles-client` | Knuckles server API | Python |
 |---|---|---|
-| 0.1.x | v1 (every route registered under `/v1/...` as of 2026-04) | 3.11, 3.12, 3.13 |
+| 0.1.0 – 0.1.1 | v1 (every route registered under `/v1/...` as of 2026-04) | 3.11, 3.12, 3.13 |
+| 0.1.2 | v1, plus the account-management (`/v1/me/*`), sessions (`/v1/sessions`), and admin (`/v1/admin/app-clients`) routes (2026-06) | 3.11, 3.12, 3.13 |
 
 If your Knuckles deployment is older than the SDK targets, calls to
-new endpoints (e.g. `/v1/auth/passkey` GET) will return 404. Upgrade
-the server first.
+new endpoints (e.g. `client.sessions.list`) will return 404. Upgrade
+the server first — everything that existed in 0.1.0 keeps working.
 
 ## Development
 

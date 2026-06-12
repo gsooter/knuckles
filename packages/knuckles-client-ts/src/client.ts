@@ -30,6 +30,7 @@
 
 import {
   createRemoteJWKSet,
+  errors as joseErrors,
   jwtVerify,
   type JWTPayload,
   type JWTVerifyResult,
@@ -41,6 +42,7 @@ import {
   KnucklesNetworkError,
   KnucklesRateLimitError,
   KnucklesTokenError,
+  KnucklesTokenExpiredError,
   KnucklesValidationError,
 } from './errors.js'
 import type {
@@ -51,6 +53,15 @@ import type {
   TokenPair,
   UserProfile,
 } from './types.js'
+
+/**
+ * Hardcoded SDK version. Kept in sync with `package.json` by hand on every
+ * release — see `PUBLISHING.md`. Importing JSON at runtime would force every
+ * consumer's bundler to ship `package.json`, which is awkward in some
+ * setups, so we mirror the constant here instead. (Lives in this module so
+ * the JWKS User-Agent default can use it without a circular import.)
+ */
+export const VERSION = '0.1.1'
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
@@ -63,15 +74,36 @@ export interface KnucklesClientOptions {
   clientSecret: string
   /** Per-request timeout in ms. Default 10_000. */
   timeoutMs?: number
+  /**
+   * Extra HTTP headers for the JWKS fetch. When no `User-Agent` is
+   * supplied the SDK defaults it to `knuckles-client-ts/<version>`.
+   * Node-only nuance: browsers strip forbidden headers like
+   * `User-Agent` from fetch requests.
+   */
+  jwksHeaders?: Record<string, string>
+  /**
+   * Operator admin token. When set, `client.admin` methods
+   * authenticate with the `X-Admin-Token` header (the app-client
+   * headers are not sent on admin routes).
+   */
+  adminToken?: string
 }
 
 interface RequestOptions {
-  method: 'GET' | 'POST' | 'DELETE'
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE'
   path: string
   json?: Record<string, unknown>
   bearer?: string
   sendClientHeaders?: boolean
+  extraHeaders?: Record<string, string>
   expectJson?: boolean
+}
+
+/** Parse a `Retry-After` header value into whole seconds (delta form only). */
+function parseRetryAfter(raw: string | null): number | null {
+  if (raw === null) return null
+  const seconds = Number.parseInt(raw.trim(), 10)
+  return Number.isNaN(seconds) ? null : seconds
 }
 
 /** Promote an HTTP error envelope to the matching SDK exception class. */
@@ -79,6 +111,7 @@ function mapApiError(opts: {
   code: string
   message: string
   statusCode: number
+  retryAfter?: number | null
 }): KnucklesAPIError {
   if (opts.statusCode === 401 || opts.statusCode === 403) {
     return new KnucklesAuthError(opts)
@@ -107,6 +140,20 @@ export class KnucklesClient {
   readonly google: OAuthClient
   readonly apple: OAuthClient
   readonly passkey: PasskeyClient
+  /**
+   * Profile + account management. Callable for backwards
+   * compatibility — `client.me({ accessToken })` behaves exactly like
+   * the pre-0.1.1 `me()` method — with the newer account-management
+   * endpoints hanging off properties (`client.me.updateProfile(...)`).
+   */
+  readonly me: MeClient
+  /** Refresh-session listing + revocation. */
+  readonly sessions: SessionsClient
+  /**
+   * Operator-only app-client management. Every method throws unless
+   * the client was constructed with `adminToken`.
+   */
+  readonly admin: AdminClient
 
   private readonly baseUrl: string
   private readonly clientId: string
@@ -121,6 +168,13 @@ export class KnucklesClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.jwks = createRemoteJWKSet(
       new URL(`${this.baseUrl}/.well-known/jwks.json`),
+      {
+        headers: {
+          'User-Agent': `knuckles-client-ts/${VERSION}`,
+          ...opts.jwksHeaders,
+        },
+        timeoutDuration: this.timeoutMs,
+      },
     )
     this.magicLink = new MagicLinkClient(this)
     this.google = new OAuthClient(this, {
@@ -132,13 +186,20 @@ export class KnucklesClient {
       completePath: '/v1/auth/apple/complete',
     })
     this.passkey = new PasskeyClient(this)
+    this.me = buildMeClient(this)
+    this.sessions = new SessionsClient(this)
+    this.admin = new AdminClient(this, opts.adminToken)
   }
 
   /**
    * Validate a Knuckles access token locally via the cached JWKS.
    * No network call after the first verify on a fresh process.
    *
-   * @throws KnucklesTokenError on signature, audience, issuer, or expiry failure.
+   * @throws KnucklesTokenExpiredError when the only failure is an
+   *   expired `exp`; the underlying `jose` `JWTExpired` error is
+   *   attached as `cause` (part of the contract).
+   * @throws KnucklesTokenError on any other signature, audience, or
+   *   issuer failure.
    */
   async verifyAccessToken(token: string): Promise<AccessTokenClaims> {
     let result: JWTVerifyResult<JWTPayload>
@@ -150,8 +211,15 @@ export class KnucklesClient {
         requiredClaims: ['iss', 'sub', 'aud', 'iat', 'exp'],
       })
     } catch (err) {
+      if (err instanceof joseErrors.JWTExpired) {
+        throw new KnucklesTokenExpiredError(
+          `Token verification failed: ${err.message}`,
+          { cause: err },
+        )
+      }
       throw new KnucklesTokenError(
         `Token verification failed: ${(err as Error).message}`,
+        { cause: err },
       )
     }
     return result.payload as AccessTokenClaims
@@ -194,23 +262,6 @@ export class KnucklesClient {
     return data['revoked'] as number
   }
 
-  /** Return the signed-in user's profile. */
-  async me(opts: { accessToken: string }): Promise<UserProfile> {
-    const body = await this.request({
-      method: 'GET',
-      path: '/v1/me',
-      bearer: opts.accessToken,
-    })
-    const data = body['data'] as Record<string, unknown>
-    return {
-      id: data['id'] as string,
-      email: data['email'] as string,
-      displayName: (data['display_name'] as string | null) ?? null,
-      avatarUrl: (data['avatar_url'] as string | null) ?? null,
-      appClientId: data['app_client_id'] as string,
-    }
-  }
-
   /** Internal HTTP wrapper (used by sub-clients via the friendly accessor). */
   async request(opts: RequestOptions): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${opts.path}`
@@ -221,6 +272,9 @@ export class KnucklesClient {
     }
     if (opts.bearer) {
       headers['Authorization'] = `Bearer ${opts.bearer}`
+    }
+    if (opts.extraHeaders) {
+      Object.assign(headers, opts.extraHeaders)
     }
     if (opts.json !== undefined) {
       headers['Content-Type'] = 'application/json'
@@ -279,6 +333,7 @@ export class KnucklesClient {
       code: env?.code ?? 'UNKNOWN',
       message: env?.message ?? '',
       statusCode: response.status,
+      retryAfter: parseRetryAfter(response.headers.get('Retry-After')),
     })
   }
 }
@@ -460,5 +515,323 @@ export class PasskeyClient {
       bearer: opts.accessToken,
       expectJson: false,
     })
+  }
+}
+
+/**
+ * Profile + account-management namespace.
+ *
+ * Callable for backwards compatibility — `client.me({ accessToken })`
+ * returns the `UserProfile` exactly as before. The newer
+ * account-management endpoints return the server's `data` payload as
+ * plain records (their shapes are newer and pass through verbatim).
+ */
+export interface MeClient {
+  /** Return the signed-in user's profile (`GET /v1/me`). */
+  (opts: { accessToken: string }): Promise<UserProfile>
+
+  /**
+   * Partially update the signed-in user's profile (`PATCH /v1/me`).
+   *
+   * Only the fields you pass are sent. An omitted field is left
+   * untouched server-side; an explicit `null` clears it.
+   */
+  updateProfile(opts: {
+    accessToken: string
+    displayName?: string | null
+    avatarUrl?: string | null
+  }): Promise<Record<string, unknown>>
+
+  /** Permanently delete the signed-in user's account (`DELETE /v1/me`). */
+  deleteAccount(opts: { accessToken: string }): Promise<void>
+
+  /**
+   * List the OAuth providers linked to the signed-in user
+   * (`GET /v1/me/providers`). Each row carries `provider`,
+   * `created_at`, and `scopes`.
+   */
+  listProviders(opts: {
+    accessToken: string
+  }): Promise<Array<Record<string, unknown>>>
+
+  /**
+   * Unlink one OAuth provider (`google` or `apple`) from the
+   * signed-in user (`DELETE /v1/me/providers/{provider}`).
+   */
+  unlinkProvider(opts: { accessToken: string; provider: string }): Promise<void>
+
+  /**
+   * Start an email-change ceremony (`POST /v1/me/email/start`).
+   * Knuckles emails a confirmation link to `newEmail`; the change
+   * only applies once `verifyEmailChange` redeems the token.
+   */
+  startEmailChange(opts: {
+    accessToken: string
+    newEmail: string
+    redirectUrl: string
+  }): Promise<void>
+
+  /**
+   * Redeem an email-change token and apply the new address
+   * (`POST /v1/me/email/verify`). Client-headers-only — no bearer;
+   * the token itself proves the ceremony. Returns the `data` record
+   * carrying the new `email`.
+   */
+  verifyEmailChange(token: string): Promise<Record<string, unknown>>
+}
+
+/** Build the callable `client.me` namespace bound to one client. */
+function buildMeClient(client: KnucklesClient): MeClient {
+  const profile = async (opts: {
+    accessToken: string
+  }): Promise<UserProfile> => {
+    const body = await client.request({
+      method: 'GET',
+      path: '/v1/me',
+      bearer: opts.accessToken,
+    })
+    const data = body['data'] as Record<string, unknown>
+    return {
+      id: data['id'] as string,
+      email: data['email'] as string,
+      displayName: (data['display_name'] as string | null) ?? null,
+      avatarUrl: (data['avatar_url'] as string | null) ?? null,
+      appClientId: data['app_client_id'] as string,
+    }
+  }
+
+  return Object.assign(profile, {
+    async updateProfile(opts: {
+      accessToken: string
+      displayName?: string | null
+      avatarUrl?: string | null
+    }): Promise<Record<string, unknown>> {
+      const json: Record<string, unknown> = {}
+      if ('displayName' in opts) {
+        json['display_name'] = opts.displayName ?? null
+      }
+      if ('avatarUrl' in opts) {
+        json['avatar_url'] = opts.avatarUrl ?? null
+      }
+      const body = await client.request({
+        method: 'PATCH',
+        path: '/v1/me',
+        json,
+        bearer: opts.accessToken,
+      })
+      return body['data'] as Record<string, unknown>
+    },
+
+    async deleteAccount(opts: { accessToken: string }): Promise<void> {
+      await client.request({
+        method: 'DELETE',
+        path: '/v1/me',
+        bearer: opts.accessToken,
+        expectJson: false,
+      })
+    },
+
+    async listProviders(opts: {
+      accessToken: string
+    }): Promise<Array<Record<string, unknown>>> {
+      const body = await client.request({
+        method: 'GET',
+        path: '/v1/me/providers',
+        bearer: opts.accessToken,
+      })
+      return body['data'] as Array<Record<string, unknown>>
+    },
+
+    async unlinkProvider(opts: {
+      accessToken: string
+      provider: string
+    }): Promise<void> {
+      await client.request({
+        method: 'DELETE',
+        path: `/v1/me/providers/${encodeURIComponent(opts.provider)}`,
+        bearer: opts.accessToken,
+        expectJson: false,
+      })
+    },
+
+    async startEmailChange(opts: {
+      accessToken: string
+      newEmail: string
+      redirectUrl: string
+    }): Promise<void> {
+      await client.request({
+        method: 'POST',
+        path: '/v1/me/email/start',
+        json: { new_email: opts.newEmail, redirect_url: opts.redirectUrl },
+        bearer: opts.accessToken,
+        expectJson: false,
+      })
+    },
+
+    async verifyEmailChange(token: string): Promise<Record<string, unknown>> {
+      const body = await client.request({
+        method: 'POST',
+        path: '/v1/me/email/verify',
+        json: { token },
+      })
+      return body['data'] as Record<string, unknown>
+    },
+  })
+}
+
+export class SessionsClient {
+  constructor(private readonly client: KnucklesClient) {}
+
+  /**
+   * List the signed-in user's active sessions (`GET /v1/sessions`).
+   * Each row carries `id`, `created_at`, and `expires_at`.
+   */
+  async list(opts: {
+    accessToken: string
+  }): Promise<Array<Record<string, unknown>>> {
+    const body = await this.client.request({
+      method: 'GET',
+      path: '/v1/sessions',
+      bearer: opts.accessToken,
+    })
+    return body['data'] as Array<Record<string, unknown>>
+  }
+
+  /**
+   * Revoke one of the signed-in user's sessions
+   * (`DELETE /v1/sessions/{sessionId}`).
+   */
+  async revoke(opts: { accessToken: string; sessionId: string }): Promise<void> {
+    await this.client.request({
+      method: 'DELETE',
+      path: `/v1/sessions/${encodeURIComponent(opts.sessionId)}`,
+      bearer: opts.accessToken,
+      expectJson: false,
+    })
+  }
+}
+
+/**
+ * Operator-only app-client management.
+ *
+ * Active only when the parent `KnucklesClient` was constructed with
+ * `adminToken`. Admin routes authenticate with the `X-Admin-Token`
+ * header alone — the app-client headers are not sent. Every method
+ * returns the server's `data` payload verbatim.
+ */
+export class AdminClient {
+  constructor(
+    private readonly client: KnucklesClient,
+    private readonly adminToken: string | undefined,
+  ) {}
+
+  /** Issue one admin call with `X-Admin-Token` auth. */
+  private async request(opts: {
+    method: 'GET' | 'POST' | 'PATCH' | 'PUT'
+    path: string
+    json?: Record<string, unknown>
+  }): Promise<Record<string, unknown>> {
+    if (this.adminToken === undefined) {
+      throw new Error(
+        'Admin API is not configured: construct KnucklesClient with ' +
+          'adminToken to use client.admin.',
+      )
+    }
+    const requestOpts: RequestOptions = {
+      method: opts.method,
+      path: opts.path,
+      sendClientHeaders: false,
+      extraHeaders: { 'X-Admin-Token': this.adminToken },
+    }
+    if (opts.json !== undefined) {
+      requestOpts.json = opts.json
+    }
+    return this.client.request(requestOpts)
+  }
+
+  /**
+   * Register a new app-client (tenant). The returned record includes
+   * the one-time plaintext `client_secret` — store it now; it is
+   * never shown again.
+   */
+  async createAppClient(opts: {
+    clientId: string
+    appName: string
+    allowedOrigins?: string[]
+  }): Promise<Record<string, unknown>> {
+    const json: Record<string, unknown> = {
+      client_id: opts.clientId,
+      app_name: opts.appName,
+    }
+    if (opts.allowedOrigins !== undefined) {
+      json['allowed_origins'] = opts.allowedOrigins
+    }
+    const body = await this.request({
+      method: 'POST',
+      path: '/v1/admin/app-clients',
+      json,
+    })
+    return body['data'] as Record<string, unknown>
+  }
+
+  /** List every registered app-client (no secrets). */
+  async listAppClients(): Promise<Array<Record<string, unknown>>> {
+    const body = await this.request({
+      method: 'GET',
+      path: '/v1/admin/app-clients',
+    })
+    return body['data'] as Array<Record<string, unknown>>
+  }
+
+  /** Fetch one app-client by id (no secrets). */
+  async getAppClient(clientId: string): Promise<Record<string, unknown>> {
+    const body = await this.request({
+      method: 'GET',
+      path: `/v1/admin/app-clients/${encodeURIComponent(clientId)}`,
+    })
+    return body['data'] as Record<string, unknown>
+  }
+
+  /**
+   * Partially update an app-client's configuration. `fields` is
+   * passed through verbatim as the PATCH body (snake_case keys, e.g.
+   * `{ app_name: ..., resend_from_email: ... }`).
+   */
+  async updateAppClient(
+    clientId: string,
+    fields: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const body = await this.request({
+      method: 'PATCH',
+      path: `/v1/admin/app-clients/${encodeURIComponent(clientId)}`,
+      json: fields,
+    })
+    return body['data'] as Record<string, unknown>
+  }
+
+  /**
+   * Rotate an app-client's secret. The returned record includes the
+   * new one-time plaintext `client_secret` — store it now; it is
+   * never shown again.
+   */
+  async rotateSecret(clientId: string): Promise<Record<string, unknown>> {
+    const body = await this.request({
+      method: 'POST',
+      path: `/v1/admin/app-clients/${encodeURIComponent(clientId)}/rotate-secret`,
+    })
+    return body['data'] as Record<string, unknown>
+  }
+
+  /** Replace an app-client's allowed origins (the complete new list). */
+  async setOrigins(
+    clientId: string,
+    allowedOrigins: string[],
+  ): Promise<Record<string, unknown>> {
+    const body = await this.request({
+      method: 'PUT',
+      path: `/v1/admin/app-clients/${encodeURIComponent(clientId)}/origins`,
+      json: { allowed_origins: allowedOrigins },
+    })
+    return body['data'] as Record<string, unknown>
   }
 }

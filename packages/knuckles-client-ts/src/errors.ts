@@ -52,16 +52,51 @@ export class KnucklesValidationError extends KnucklesAPIError {
 
 /** 429 from Knuckles — back off and retry later. */
 export class KnucklesRateLimitError extends KnucklesAPIError {
-  constructor(opts: { code: string; message: string; statusCode: number }) {
+  /**
+   * Seconds to wait before retrying, parsed from the `Retry-After`
+   * response header. `null` when the server didn't send the header
+   * (older Knuckles servers) or sent an HTTP-date form the SDK does
+   * not parse.
+   */
+  readonly retryAfter: number | null
+
+  constructor(opts: {
+    code: string
+    message: string
+    statusCode: number
+    retryAfter?: number | null
+  }) {
     super(opts)
     this.name = 'KnucklesRateLimitError'
+    this.retryAfter = opts.retryAfter ?? null
   }
 }
 
 /** Local JWKS verification failure (signature, audience, issuer, expiry). */
 export class KnucklesTokenError extends KnucklesError {
-  constructor(message: string) {
+  constructor(message: string, options?: ErrorOptions) {
     super(message)
     this.name = 'KnucklesTokenError'
+    if (options?.cause !== undefined) {
+      this.cause = options.cause
+    }
+  }
+}
+
+/**
+ * Local verification failure *specifically because the token expired*.
+ *
+ * Subclass of {@link KnucklesTokenError}, so existing
+ * `instanceof KnucklesTokenError` checks keep working. Catch this
+ * class when expiry should trigger a refresh attempt while every
+ * other verification failure stays a hard error.
+ *
+ * The `cause` chain is part of the contract: this error always
+ * carries the underlying `jose` `JWTExpired` error as `cause`.
+ */
+export class KnucklesTokenExpiredError extends KnucklesTokenError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'KnucklesTokenExpiredError'
   }
 }

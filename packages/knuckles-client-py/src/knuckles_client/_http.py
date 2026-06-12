@@ -23,12 +23,32 @@ from .exceptions import (
 _DEFAULT_TIMEOUT_SECONDS = 10
 
 
+def _parse_retry_after(raw: str | None) -> int | None:
+    """Parse a ``Retry-After`` header value into whole seconds.
+
+    Args:
+        raw: The raw header value, or ``None`` when absent.
+
+    Returns:
+        The delay in seconds for the delta-seconds form, or ``None``
+        when the header is absent or uses the HTTP-date form (which
+        the SDK deliberately does not parse).
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return None
+
+
 def _map_error(
     *,
     code: str,
     message: str,
     status_code: int,
     request_id: str | None = None,
+    retry_after: int | None = None,
 ) -> KnucklesAPIError:
     """Promote an error envelope to the matching SDK exception class.
 
@@ -38,6 +58,8 @@ def _map_error(
         status_code: HTTP status from Knuckles.
         request_id: Optional ``meta.request_id`` from the response,
             propagated onto the exception for log correlation.
+        retry_after: Optional whole-second delay from the
+            ``Retry-After`` response header; only meaningful on 429.
 
     Returns:
         A :class:`KnucklesAPIError` (or one of its subclasses).
@@ -62,6 +84,7 @@ def _map_error(
             message=message,
             status_code=status_code,
             request_id=request_id,
+            retry_after=retry_after,
         )
     return KnucklesAPIError(
         code=code,
@@ -121,12 +144,14 @@ class HttpTransport:
         json: dict[str, Any] | None = None,
         bearer: str | None = None,
         send_client_headers: bool = True,
+        extra_headers: dict[str, str] | None = None,
         expect_json: bool = True,
     ) -> dict[str, Any]:
         """Issue one HTTP call and return the parsed JSON body.
 
         Args:
-            method: HTTP verb (``"GET"``, ``"POST"``, ``"DELETE"``).
+            method: HTTP verb (``"GET"``, ``"POST"``, ``"PATCH"``,
+                ``"PUT"``, ``"DELETE"``).
             path: Path under the base URL, leading slash included.
             json: Optional JSON body.
             bearer: Optional access-token to send as
@@ -135,6 +160,9 @@ class HttpTransport:
                 ``X-Client-Id``/``X-Client-Secret`` even when configured
                 — used by the JWKS fetcher and other unauthenticated
                 routes.
+            extra_headers: Optional additional headers (e.g.
+                ``X-Admin-Token`` on admin routes). Applied after the
+                client headers, so they win on collision.
             expect_json: If ``False``, treat an empty body as success
                 and return ``{}``. Used by 204 responses (logout).
 
@@ -153,6 +181,8 @@ class HttpTransport:
             headers.update(self._client_headers)
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
+        if extra_headers:
+            headers.update(extra_headers)
         try:
             response = self._session.request(
                 method,
@@ -201,6 +231,7 @@ class HttpTransport:
             message=str(error.get("message", "")),
             status_code=response.status_code,
             request_id=request_id,
+            retry_after=_parse_retry_after(response.headers.get("Retry-After")),
         )
 
     def get_json(self, path: str) -> dict[str, Any]:

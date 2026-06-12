@@ -10,15 +10,23 @@ Sub-clients group related ceremonies:
 * ``client.google`` — Google Sign-In.
 * ``client.apple`` — Sign in with Apple.
 * ``client.passkey`` — WebAuthn registration + sign-in + management.
+* ``client.me`` — profile + account management (callable for the
+  classic ``client.me(access_token=...)`` profile fetch).
+* ``client.sessions`` — refresh-session listing + revocation.
+* ``client.admin`` — operator-only app-client management; active only
+  when the client is constructed with ``admin_token=...``.
 
-Every method returns a typed dataclass from :mod:`models` and raises
-a typed exception from :mod:`exceptions` on failure.
+Every ceremony method returns a typed dataclass from :mod:`models` and
+raises a typed exception from :mod:`exceptions` on failure. The
+account-management, session, and admin methods return the server's
+``data`` payload as plain dicts — those endpoint shapes are newer and
+pass through verbatim.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 
 import requests
 
@@ -31,6 +39,26 @@ from .models import (
     TokenPair,
     UserProfile,
 )
+
+
+class _Unset:
+    """Sentinel type marking an argument as "not provided".
+
+    Lets :func:`_MeClient.update_profile` distinguish an omitted field
+    (leave it untouched server-side) from an explicit ``None`` (clear
+    the field).
+    """
+
+    def __repr__(self) -> str:
+        """Return a debugging-friendly marker.
+
+        Returns:
+            The literal string ``"<UNSET>"``.
+        """
+        return "<UNSET>"
+
+
+_UNSET: Final[_Unset] = _Unset()
 
 
 def _parse_token_pair(data: dict[str, Any]) -> TokenPair:
@@ -380,6 +408,374 @@ class _PasskeyClient:
         )
 
 
+class _MeClient:
+    """Profile + account-management sub-client.
+
+    Callable for backwards compatibility: ``client.me(access_token=...)``
+    behaves exactly like the pre-0.1.2 ``me()`` method and returns a
+    :class:`UserProfile`. The newer account-management endpoints hang
+    off attributes (``client.me.update_profile(...)`` etc.) and return
+    the server's ``data`` payload as plain dicts.
+
+    Attributes:
+        _http: Shared transport.
+    """
+
+    def __init__(self, http: HttpTransport) -> None:
+        """Initialize with the shared transport.
+
+        Args:
+            http: Transport from the parent client.
+        """
+        self._http = http
+
+    def __call__(self, *, access_token: str) -> UserProfile:
+        """Return the signed-in user's profile.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+
+        Returns:
+            A :class:`UserProfile`.
+        """
+        body = self._http.request("GET", "/v1/me", bearer=access_token)
+        data = body["data"]
+        return UserProfile(
+            id=data["id"],
+            email=data["email"],
+            display_name=data.get("display_name"),
+            avatar_url=data.get("avatar_url"),
+            app_client_id=data["app_client_id"],
+        )
+
+    def update_profile(
+        self,
+        *,
+        access_token: str,
+        display_name: str | None | _Unset = _UNSET,
+        avatar_url: str | None | _Unset = _UNSET,
+    ) -> dict[str, Any]:
+        """Partially update the signed-in user's profile.
+
+        Only the fields you pass are sent. An omitted field is left
+        untouched server-side; an explicit ``None`` clears it.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+            display_name: New display name, or ``None`` to clear it.
+                Omit to leave unchanged.
+            avatar_url: New avatar URL, or ``None`` to clear it. Omit
+                to leave unchanged.
+
+        Returns:
+            The updated profile dict from the response ``data``.
+        """
+        payload: dict[str, Any] = {}
+        if not isinstance(display_name, _Unset):
+            payload["display_name"] = display_name
+        if not isinstance(avatar_url, _Unset):
+            payload["avatar_url"] = avatar_url
+        body = self._http.request("PATCH", "/v1/me", json=payload, bearer=access_token)
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+    def delete_account(self, *, access_token: str) -> None:
+        """Permanently delete the signed-in user's account.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+        """
+        self._http.request("DELETE", "/v1/me", bearer=access_token, expect_json=False)
+
+    def list_providers(self, *, access_token: str) -> list[dict[str, Any]]:
+        """List the OAuth providers linked to the signed-in user.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+
+        Returns:
+            A possibly-empty list of dicts, each carrying ``provider``,
+            ``created_at``, and ``scopes``.
+        """
+        body = self._http.request("GET", "/v1/me/providers", bearer=access_token)
+        data = body["data"]
+        assert isinstance(data, list)
+        return data
+
+    def unlink_provider(self, *, access_token: str, provider: str) -> None:
+        """Unlink one OAuth provider from the signed-in user.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+            provider: Provider name to unlink (``"google"`` or
+                ``"apple"``).
+        """
+        self._http.request(
+            "DELETE",
+            f"/v1/me/providers/{provider}",
+            bearer=access_token,
+            expect_json=False,
+        )
+
+    def start_email_change(
+        self,
+        *,
+        access_token: str,
+        new_email: str,
+        redirect_url: str,
+    ) -> None:
+        """Start an email-change ceremony for the signed-in user.
+
+        Knuckles emails a confirmation link to ``new_email``; the
+        change only applies once :func:`verify_email_change` redeems
+        the token from that link.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+            new_email: The address to change to.
+            redirect_url: Verify endpoint on the consuming app. Must
+                lie under one of the app-client's ``allowed_origins``.
+        """
+        self._http.request(
+            "POST",
+            "/v1/me/email/start",
+            json={"new_email": new_email, "redirect_url": redirect_url},
+            bearer=access_token,
+            expect_json=False,
+        )
+
+    def verify_email_change(self, token: str) -> dict[str, Any]:
+        """Redeem an email-change token and apply the new address.
+
+        Client-headers-only call — no bearer needed; the token itself
+        proves the ceremony.
+
+        Args:
+            token: The raw token from the confirmation email's
+                ``token=`` param.
+
+        Returns:
+            The response ``data`` dict carrying the new ``email``.
+        """
+        body = self._http.request("POST", "/v1/me/email/verify", json={"token": token})
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+
+class _SessionsClient:
+    """Refresh-session listing + revocation sub-client.
+
+    Attributes:
+        _http: Shared transport.
+    """
+
+    def __init__(self, http: HttpTransport) -> None:
+        """Initialize with the shared transport.
+
+        Args:
+            http: Transport from the parent client.
+        """
+        self._http = http
+
+    def list(self, *, access_token: str) -> list[dict[str, Any]]:
+        """List the signed-in user's active sessions.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+
+        Returns:
+            A possibly-empty list of dicts, each carrying ``id``,
+            ``created_at``, and ``expires_at``.
+        """
+        body = self._http.request("GET", "/v1/sessions", bearer=access_token)
+        data = body["data"]
+        assert isinstance(data, list)
+        return data
+
+    def revoke(self, *, access_token: str, session_id: str) -> None:
+        """Revoke one of the signed-in user's sessions.
+
+        Args:
+            access_token: Bearer access token of the signed-in user.
+            session_id: The session id to revoke (from :func:`list`).
+        """
+        self._http.request(
+            "DELETE",
+            f"/v1/sessions/{session_id}",
+            bearer=access_token,
+            expect_json=False,
+        )
+
+
+class _AdminClient:
+    """Operator-only app-client management sub-client.
+
+    Active only when the parent :class:`KnucklesClient` was constructed
+    with ``admin_token=...``. Admin routes authenticate with the
+    ``X-Admin-Token`` header alone — the app-client headers are not
+    sent. Every method returns the server's ``data`` payload verbatim.
+
+    Attributes:
+        _http: Shared transport.
+        _admin_token: The operator admin token, or ``None`` when the
+            admin API is not configured.
+    """
+
+    def __init__(self, http: HttpTransport, *, admin_token: str | None) -> None:
+        """Initialize with the shared transport and optional token.
+
+        Args:
+            http: Transport from the parent client.
+            admin_token: Operator admin token, or ``None`` to leave the
+                admin API inactive.
+        """
+        self._http = http
+        self._admin_token = admin_token
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Issue one admin call with ``X-Admin-Token`` auth.
+
+        Args:
+            method: HTTP verb.
+            path: Path under the base URL, leading slash included.
+            json: Optional JSON body.
+
+        Returns:
+            The parsed JSON body.
+
+        Raises:
+            RuntimeError: If the parent client was constructed without
+                ``admin_token``.
+        """
+        if self._admin_token is None:
+            raise RuntimeError(
+                "Admin API is not configured: construct KnucklesClient with "
+                "admin_token=... to use client.admin."
+            )
+        return self._http.request(
+            method,
+            path,
+            json=json,
+            send_client_headers=False,
+            extra_headers={"X-Admin-Token": self._admin_token},
+        )
+
+    def create_app_client(
+        self,
+        *,
+        client_id: str,
+        app_name: str,
+        allowed_origins: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Register a new app-client (tenant).
+
+        Args:
+            client_id: The new tenant's ``client_id``.
+            app_name: Human-facing application name.
+            allowed_origins: Optional list of origins permitted in
+                ceremony ``redirect_url`` values.
+
+        Returns:
+            The created app-client dict, including the one-time
+            plaintext ``client_secret`` — store it now; it is never
+            shown again.
+        """
+        payload: dict[str, Any] = {"client_id": client_id, "app_name": app_name}
+        if allowed_origins is not None:
+            payload["allowed_origins"] = allowed_origins
+        body = self._request("POST", "/v1/admin/app-clients", json=payload)
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+    def list_app_clients(self) -> list[dict[str, Any]]:
+        """List every registered app-client.
+
+        Returns:
+            A possibly-empty list of app-client dicts (no secrets).
+        """
+        body = self._request("GET", "/v1/admin/app-clients")
+        data = body["data"]
+        assert isinstance(data, list)
+        return data
+
+    def get_app_client(self, client_id: str) -> dict[str, Any]:
+        """Fetch one app-client by id.
+
+        Args:
+            client_id: The tenant's ``client_id``.
+
+        Returns:
+            The app-client dict (no secrets).
+        """
+        body = self._request("GET", f"/v1/admin/app-clients/{client_id}")
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+    def update_app_client(self, client_id: str, **fields: Any) -> dict[str, Any]:
+        """Partially update an app-client's configuration.
+
+        Args:
+            client_id: The tenant's ``client_id``.
+            **fields: Column/value pairs passed through verbatim as the
+                PATCH body (e.g. ``app_name=...``,
+                ``resend_from_email=...``).
+
+        Returns:
+            The updated app-client dict.
+        """
+        body = self._request(
+            "PATCH", f"/v1/admin/app-clients/{client_id}", json=dict(fields)
+        )
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+    def rotate_secret(self, client_id: str) -> dict[str, Any]:
+        """Rotate an app-client's secret.
+
+        Args:
+            client_id: The tenant's ``client_id``.
+
+        Returns:
+            A dict including the new one-time plaintext
+            ``client_secret`` — store it now; it is never shown again.
+        """
+        body = self._request("POST", f"/v1/admin/app-clients/{client_id}/rotate-secret")
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+    def set_origins(self, client_id: str, allowed_origins: list[str]) -> dict[str, Any]:
+        """Replace an app-client's allowed origins.
+
+        Args:
+            client_id: The tenant's ``client_id``.
+            allowed_origins: The complete new list of origins permitted
+                in ceremony ``redirect_url`` values.
+
+        Returns:
+            The updated app-client dict.
+        """
+        body = self._request(
+            "PUT",
+            f"/v1/admin/app-clients/{client_id}/origins",
+            json={"allowed_origins": allowed_origins},
+        )
+        data = body["data"]
+        assert isinstance(data, dict)
+        return data
+
+
 class KnucklesClient:
     """Top-level Knuckles SDK client.
 
@@ -392,6 +788,13 @@ class KnucklesClient:
         google: Google OAuth sub-client.
         apple: Apple OAuth sub-client.
         passkey: WebAuthn passkey sub-client.
+        me: Profile + account-management sub-client. Callable —
+            ``client.me(access_token=...)`` returns the
+            :class:`UserProfile` exactly as before.
+        sessions: Session listing + revocation sub-client.
+        admin: Operator app-client management sub-client. Raises
+            :class:`RuntimeError` from every method unless the client
+            was constructed with ``admin_token=...``.
     """
 
     def __init__(
@@ -402,6 +805,8 @@ class KnucklesClient:
         client_secret: str,
         timeout: float = 10,
         session: requests.Session | None = None,
+        jwks_headers: dict[str, str] | None = None,
+        admin_token: str | None = None,
     ) -> None:
         """Initialize the client.
 
@@ -413,6 +818,13 @@ class KnucklesClient:
             client_secret: This consuming app's ``client_secret``.
             timeout: Per-request timeout in seconds.
             session: Optional pre-built :class:`requests.Session`.
+            jwks_headers: Optional HTTP headers for the JWKS fetch.
+                When no ``User-Agent`` is supplied the SDK defaults it
+                to ``knuckles-client-py/<version>`` (urllib's stock
+                User-Agent is blocked by common WAF rules).
+            admin_token: Optional operator admin token. When set,
+                ``client.admin`` methods authenticate via
+                ``X-Admin-Token``.
         """
         self._http = HttpTransport(
             base_url=base_url,
@@ -425,11 +837,15 @@ class KnucklesClient:
             jwks_uri=f"{self._http.base_url}/.well-known/jwks.json",
             issuer=self._http.base_url,
             audience=client_id,
+            headers=jwks_headers,
         )
         self.magic_link = _MagicLinkClient(self._http)
         self.google = _GoogleClient(self._http)
         self.apple = _AppleClient(self._http)
         self.passkey = _PasskeyClient(self._http)
+        self.me = _MeClient(self._http)
+        self.sessions = _SessionsClient(self._http)
+        self.admin = _AdminClient(self._http, admin_token=admin_token)
 
     def verify_access_token(self, token: str) -> dict[str, Any]:
         """Validate a Knuckles access token locally via the cached JWKS.
@@ -444,7 +860,10 @@ class KnucklesClient:
             The decoded claims dict.
 
         Raises:
-            KnucklesTokenError: For any signature/audience/issuer/expiry
+            KnucklesTokenExpiredError: The token is valid except its
+                ``exp`` is in the past (raised ``from`` the underlying
+                :class:`jwt.ExpiredSignatureError`).
+            KnucklesTokenError: For any other signature/audience/issuer
                 failure.
         """
         return self._verifier.verify(token)
@@ -503,25 +922,6 @@ class KnucklesClient:
         revoked = body["data"]["revoked"]
         assert isinstance(revoked, int)
         return revoked
-
-    def me(self, *, access_token: str) -> UserProfile:
-        """Return the signed-in user's profile.
-
-        Args:
-            access_token: Bearer access token of the signed-in user.
-
-        Returns:
-            A :class:`UserProfile`.
-        """
-        body = self._http.request("GET", "/v1/me", bearer=access_token)
-        data = body["data"]
-        return UserProfile(
-            id=data["id"],
-            email=data["email"],
-            display_name=data.get("display_name"),
-            avatar_url=data.get("avatar_url"),
-            app_client_id=data["app_client_id"],
-        )
 
     def fetch_jwks(self) -> dict[str, Any]:
         """Return Knuckles' raw JWKS document.
