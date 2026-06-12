@@ -242,7 +242,8 @@ def verify_magic_link(
         A matched :class:`~knuckles.services.tokens.TokenPair`.
 
     Raises:
-        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token),
+        AppError: With code ``MAGIC_LINK_INVALID`` (unknown token, or
+            the owning user has been deactivated),
             ``MAGIC_LINK_ALREADY_USED`` (already redeemed), or
             ``MAGIC_LINK_EXPIRED`` (past ``expires_at``).
     """
@@ -270,6 +271,14 @@ def verify_magic_link(
         )
 
     user = repo.get_user_by_email(session, row.email)
+    if user is not None and not user.is_active:
+        # Mirror the OAuth and passkey paths: a deactivated account
+        # must not regain a session just because it kept email access.
+        raise AppError(
+            code=MAGIC_LINK_INVALID,
+            message="Magic link is invalid.",
+            status_code=400,
+        )
     if user is None:
         user = repo.create_user(session, email=row.email)
 

@@ -16,9 +16,9 @@ from flask import Flask
 from flask.testing import FlaskClient
 from sqlalchemy.orm import Session
 
-import knuckles.api.v1.magic_link as magic_link_route_mod
 import knuckles.core.app_client_auth as app_client_auth_mod
 import knuckles.core.database as database_mod
+import knuckles.services.magic_link as magic_link_service_mod
 from knuckles.app import create_app
 
 
@@ -85,7 +85,9 @@ def app(
     monkeypatch.setattr(database_mod, "get_db", lambda: db_session)
     monkeypatch.setattr(app_client_auth_mod.database, "get_db", lambda: db_session)
     monkeypatch.setattr(
-        magic_link_route_mod, "get_default_sender", lambda: email_sender
+        magic_link_service_mod,
+        "get_default_sender",
+        lambda api_key=None, from_address=None: email_sender,
     )
     yield create_app()
 
@@ -233,3 +235,60 @@ def test_verify_magic_link_validates_token_field(
     )
     assert response.status_code == 422
     assert response.get_json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_start_magic_link_resolves_tenant_sender_via_http(
+    client: FlaskClient,
+    db_session: Session,
+    app_client_creds: tuple[str, str],
+    email_sender: _FakeEmailSender,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP path builds the sender from the tenant's own columns.
+
+    Regression test: the route used to pre-build an env-only sender,
+    which silently bypassed the per-tenant Resend credentials
+    (Decision #017) on every production request.
+    """
+    from knuckles.data.repositories import auth as repo
+
+    row = repo.get_app_client(db_session, app_client_creds[0])
+    assert row is not None
+    row.resend_api_key = "re_tenant_key"
+    row.resend_from_email = "auth@tenant.example"
+    db_session.flush()
+
+    factory_calls: list[tuple[str | None, str | None]] = []
+
+    def _recording_factory(
+        api_key: str | None = None,
+        from_address: str | None = None,
+    ) -> _FakeEmailSender:
+        """Record the credentials resolved on the HTTP path.
+
+        Args:
+            api_key: Resend API key the service passed.
+            from_address: From address the service passed.
+
+        Returns:
+            The shared fake sender.
+        """
+        factory_calls.append((api_key, from_address))
+        return email_sender
+
+    monkeypatch.setattr(
+        magic_link_service_mod, "get_default_sender", _recording_factory
+    )
+
+    response = client.post(
+        "/v1/auth/magic-link/start",
+        json={
+            "email": "user@example.com",
+            "redirect_url": "http://localhost:3000/auth/verify",
+        },
+        headers=_auth_headers(app_client_creds),
+    )
+
+    assert response.status_code == 202
+    assert factory_calls == [("re_tenant_key", "auth@tenant.example")]
+    assert len(email_sender.sent) == 1

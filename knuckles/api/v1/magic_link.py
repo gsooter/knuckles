@@ -31,7 +31,6 @@ from knuckles.core.app_client_auth import (
 from knuckles.core.exceptions import RATE_LIMITED, AppError, ValidationError
 from knuckles.core.rate_limit import magic_link_limiter
 from knuckles.services import magic_link
-from knuckles.services.email import get_default_sender
 
 
 def _require_string_field(field: str) -> str:
@@ -85,12 +84,14 @@ def start_magic_link_route() -> tuple[Response, int]:
         )
 
     session = database.get_db()
+    # No sender is injected here: the service resolves the tenant's
+    # own Resend credentials from the app_clients row (Decision #017),
+    # falling back to the operator env vars when the columns are NULL.
     magic_link.start_magic_link(
         session,
         email=email,
         app_client_id=app_client.client_id,
         redirect_url=redirect_url,
-        sender=get_default_sender(),
     )
     return jsonify({}), 202
 
