@@ -181,7 +181,8 @@ Every Knuckles error surfaces as a typed exception:
 | Refresh token was already used | `KnucklesAuthError` | `exc.code == "REFRESH_TOKEN_REUSED"` | Sign the user out everywhere. Surface "you've been signed out for security reasons." |
 | Refresh token's 30 days elapsed | `KnucklesAuthError` | `exc.code == "REFRESH_TOKEN_EXPIRED"` | Send the user back to the sign-in page. |
 | Access token is invalid / expired | `KnucklesTokenError` | catch by class | Try a refresh. If that also fails, send to sign-in. |
-| User typed magic-link email too fast | `KnucklesRateLimitError` | catch by class | Show "try again in a minute." |
+| Access token is *specifically* expired | `KnucklesTokenExpiredError` | catch by class (subclass of `KnucklesTokenError`, since `knuckles-client` 0.1.2 / `@knuckles/client` 0.1.1) | Refresh with confidence — the token was valid except for `exp`. |
+| User typed magic-link email too fast | `KnucklesRateLimitError` | catch by class | Show "try again in a minute." `exc.retry_after` (`err.retryAfter` in TS) carries the parsed `Retry-After` seconds. |
 | Bad input (caller's fault) | `KnucklesValidationError` | catch by class | Treat as a bug. Don't surface to the user. |
 | Knuckles unreachable | `KnucklesNetworkError` | catch by class | Retry with backoff. Fail closed for protected resources. |
 
@@ -193,6 +194,37 @@ apart. The full code vocabulary lives in
 
 The SDKs raise these with the same names and the same shape across
 Python and TypeScript.
+
+---
+
+## Beyond sign-in: account self-service
+
+Once a user is signed in, the SDKs also cover the account-settings
+surface — no extra HTTP code on your side:
+
+- **Profile update** — `client.me.update_profile(...)` /
+  `knuckles.me.updateProfile(...)` (`PATCH /v1/me`).
+- **Account deletion** — `client.me.delete_account(...)`
+  (`DELETE /v1/me`). Account-wide: kills sessions with every app.
+- **Linked providers** — `client.me.list_providers(...)` /
+  `client.me.unlink_provider(...)` (`GET` / `DELETE
+  /v1/me/providers`).
+- **Verified email change** — `client.me.start_email_change(...)`
+  then `client.me.verify_email_change(token)` from your callback
+  (`POST /v1/me/email/start` / `verify`).
+- **Session list / revoke** — `client.sessions.list(...)` /
+  `client.sessions.revoke(...)` (`GET /v1/sessions`, `DELETE
+  /v1/sessions/<id>`) for a "your devices" page.
+
+These ship in `knuckles-client` **0.1.2** and `@knuckles/client`
+**0.1.1**, which also add a `jwks_headers` / `jwksHeaders` option
+(extra HTTP headers on the JWKS fetch, for proxied deployments).
+
+Operators get an HTTP provisioning surface too: `client.admin.*`
+wraps the `/v1/admin/app-clients` routes (register, configure,
+rotate-secret, origins). It authenticates with the `X-Admin-Token`
+header and only exists when the server sets `KNUCKLES_ADMIN_TOKEN` —
+unset, those routes 404.
 
 ---
 
@@ -237,7 +269,9 @@ talk to the HTTP API directly. You'll want to implement:
 3. **The seven endpoints you actually need:** `magic-link/start`,
    `magic-link/verify`, `google/start`, `google/complete`,
    `apple/start`, `apple/complete`, `token/refresh`. (Add the
-   passkey four if you want passkeys.)
+   passkey four if you want passkeys, and the self-service surface —
+   `/v1/me` PATCH/DELETE, `/v1/me/providers`, `/v1/me/email/*`,
+   `/v1/sessions` — if you're building account settings.)
 
 The full schema is in [`docs/openapi.yaml`](api/) — drop it into
 [Swagger Editor](https://editor.swagger.io) or generate a client with

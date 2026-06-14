@@ -293,6 +293,58 @@ even if you know its ID.
 
 ---
 
+## Build an account-settings page
+
+The rest of the settings surface works the same way as passkeys —
+one SDK call per widget (`knuckles-client` >= 0.1.2,
+`@knuckles/client` >= 0.1.1):
+
+### Python
+
+```python
+# "Your devices": list active sessions, revoke one
+for s in client.sessions.list(access_token=token):
+    print(s["id"], s["created_at"], s["expires_at"])
+client.sessions.revoke(access_token=token, session_id="session-uuid")
+
+# Profile: pass only what changed; None clears a field
+client.me.update_profile(access_token=token, display_name="New Name")
+
+# Linked sign-in methods
+client.me.list_providers(access_token=token)
+client.me.unlink_provider(access_token=token, provider="google")
+
+# Verified email change: start sends the link; your callback verifies
+client.me.start_email_change(
+    access_token=token,
+    new_email="new@example.com",
+    redirect_url="https://yourapp.com/email-change/callback",
+)
+client.me.verify_email_change(request.args["token"])  # in the callback
+
+# Danger zone
+client.me.delete_account(access_token=token)
+```
+
+### TypeScript
+
+```ts
+const sessions = await knuckles.sessions.list({ accessToken })
+await knuckles.sessions.revoke({ accessToken, sessionId: sessions[0].id })
+
+await knuckles.me.updateProfile({ accessToken, displayName: 'New Name' })
+await knuckles.me.unlinkProvider({ accessToken, provider: 'google' })
+await knuckles.me.deleteAccount({ accessToken })
+```
+
+Session ids change on every silent refresh (rotation replaces the
+row), so fetch the list right before rendering. Email-change start
+shares the magic-link rate limit — catch `KnucklesRateLimitError`
+and honor `retry_after`. Account deletion is account-wide (every
+app, every device), so gate it behind the recent-sign-in check above.
+
+---
+
 ## Handle "this email is already used by another method"
 
 When a user signs in with Google but their email already has a
@@ -345,7 +397,7 @@ If you run something like Better Stack / Upptime / a status page:
 
 | What to monitor | URL | Expected |
 |---|---|---|
-| Liveness | `GET /health` | 200, body `{"status":"ok"}` |
+| Liveness | `GET /health` | 200, body `{"status":"ok","database":"ok"}` — 503 with `{"status":"degraded","database":"unreachable"}` when the DB is down |
 | JWKS | `GET /.well-known/jwks.json` | 200, JSON with `keys[]` |
 | OIDC metadata | `GET /.well-known/openid-configuration` | 200, JSON with `issuer` and `jwks_uri` |
 
@@ -354,24 +406,29 @@ verification within ~1h (cached JWKS keys time out).
 
 ---
 
-## Run the magic-link cleanup nightly
+## Run the cleanups nightly
 
-`scripts/cleanup_magic_links.py` deletes expired magic-link rows.
-Wire it to your platform's scheduler:
+`scripts/cleanup_magic_links.py` deletes expired magic-link rows;
+`scripts/cleanup_refresh_tokens.py` deletes long-expired refresh-token
+rows (default grace window: 7 days past expiry, so a freshly expired
+token still reports `REFRESH_TOKEN_EXPIRED` rather than
+`REFRESH_TOKEN_INVALID`). Wire both to your platform's scheduler:
 
-**Railway** — add a "Scheduled job" service with the command:
+**Railway** — add a "Scheduled job" service with the commands:
 
 ```bash
 python scripts/cleanup_magic_links.py --older-than-hours 24
+python scripts/cleanup_refresh_tokens.py --older-than-days 7
 ```
 
 **Cron** (your own server):
 
 ```cron
 0 3 * * * /path/to/python /path/to/scripts/cleanup_magic_links.py --older-than-hours 24
+15 3 * * * /path/to/python /path/to/scripts/cleanup_refresh_tokens.py --older-than-days 7
 ```
 
-Idempotent — safe to run as often as you want.
+Both are idempotent — safe to run as often as you want.
 
 ---
 

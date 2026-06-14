@@ -28,7 +28,11 @@ import secrets
 from sqlalchemy.orm import Session
 
 from knuckles.core.app_client_auth import _origin_of
-from knuckles.core.exceptions import NotFoundError, ValidationError
+from knuckles.core.exceptions import (
+    APP_CLIENT_NOT_FOUND,
+    NotFoundError,
+    ValidationError,
+)
 from knuckles.data.models import AppClient
 from knuckles.data.repositories import auth as repo
 
@@ -113,12 +117,12 @@ def _require_client(session: Session, client_id: str) -> AppClient:
         The matching ``AppClient`` row.
 
     Raises:
-        NotFoundError: With code ``NOT_FOUND`` if no row matches.
+        NotFoundError: With code ``APP_CLIENT_NOT_FOUND`` if no row matches.
     """
     client = repo.get_app_client(session, client_id)
     if client is None:
         raise NotFoundError(
-            code="NOT_FOUND",
+            code=APP_CLIENT_NOT_FOUND,
             message=f"No app client with client_id {client_id!r}.",
         )
     return client
@@ -150,7 +154,7 @@ def get_client(session: Session, *, client_id: str) -> AppClient:
         The matching ``AppClient`` row.
 
     Raises:
-        NotFoundError: With code ``NOT_FOUND`` if no row matches.
+        NotFoundError: With code ``APP_CLIENT_NOT_FOUND`` if no row matches.
     """
     return _require_client(session, client_id)
 
@@ -227,7 +231,7 @@ def rotate_secret(session: Session, *, client_id: str) -> str:
         is persisted, so it cannot be recovered later.
 
     Raises:
-        NotFoundError: With code ``NOT_FOUND`` if no row matches.
+        NotFoundError: With code ``APP_CLIENT_NOT_FOUND`` if no row matches.
     """
     plaintext_secret = secrets.token_urlsafe(48)
     client = repo.rotate_app_client_secret(
@@ -235,7 +239,7 @@ def rotate_secret(session: Session, *, client_id: str) -> str:
     )
     if client is None:
         raise NotFoundError(
-            code="NOT_FOUND",
+            code=APP_CLIENT_NOT_FOUND,
             message=f"No app client with client_id {client_id!r}.",
         )
     _audit_log.info("app_client.rotate_secret client_id=%s", client_id)
@@ -260,13 +264,13 @@ def set_origins(
 
     Raises:
         ValidationError: If any origin fails to parse as http(s).
-        NotFoundError: With code ``NOT_FOUND`` if no row matches.
+        NotFoundError: With code ``APP_CLIENT_NOT_FOUND`` if no row matches.
     """
     origins = _normalize_origins(allowed_origins)
     client = repo.set_app_client_origins(session, client_id, allowed_origins=origins)
     if client is None:
         raise NotFoundError(
-            code="NOT_FOUND",
+            code=APP_CLIENT_NOT_FOUND,
             message=f"No app client with client_id {client_id!r}.",
         )
     _audit_log.info(
@@ -298,7 +302,7 @@ def update_config(
         The updated ``AppClient`` row.
 
     Raises:
-        NotFoundError: With code ``NOT_FOUND`` if no row matches.
+        NotFoundError: With code ``APP_CLIENT_NOT_FOUND`` if no row matches.
         ValidationError: If any key is outside the tenant-config
             allow-list, or the ``webauthn_rp_id`` guardrail trips
             (value differs from a non-NULL current value while
@@ -327,7 +331,7 @@ def update_config(
         raise ValidationError(str(exc)) from exc
     if updated is None:  # pragma: no cover — row loaded above in-session.
         raise NotFoundError(
-            code="NOT_FOUND",
+            code=APP_CLIENT_NOT_FOUND,
             message=f"No app client with client_id {client_id!r}.",
         )
     _audit_log.info(

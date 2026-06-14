@@ -24,7 +24,7 @@ from typing import ParamSpec, TypeVar, cast
 from flask import request
 
 from knuckles.core.config import get_settings
-from knuckles.core.exceptions import NotFoundError, UnauthorizedError
+from knuckles.core.exceptions import NOT_FOUND, NotFoundError, UnauthorizedError
 
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
@@ -67,7 +67,7 @@ def require_admin(view: Callable[_P, _T]) -> Callable[_P, _T]:
         """
         admin_token = get_settings().knuckles_admin_token
         if not admin_token:
-            raise NotFoundError(code="NOT_FOUND", message="Not found.")
+            raise NotFoundError(code=NOT_FOUND, message="Not found.")
 
         provided = request.headers.get("X-Admin-Token", "").strip()
         if not provided or not hmac.compare_digest(

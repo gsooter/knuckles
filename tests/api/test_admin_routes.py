@@ -266,7 +266,7 @@ def test_get_app_client_unknown_404(
     response = client.get("/v1/admin/app-clients/nope", headers=admin_headers)
 
     assert response.status_code == 404
-    assert response.get_json()["error"]["code"] == "NOT_FOUND"
+    assert response.get_json()["error"]["code"] == "APP_CLIENT_NOT_FOUND"
 
 
 # ---------------------------------------------------------------------------
