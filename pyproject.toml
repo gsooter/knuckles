@@ -13,7 +13,7 @@ description = "Centralized identity and authentication service"
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3.0,<4",
-    "sqlalchemy>=2.0,<3",
+    "sqlalchemy>=2.0,<2.1",  # 2.1 defaults postgresql:// to psycopg3 (not installed); see DECISIONS
     "alembic>=1.13,<2",
     "psycopg2-binary>=2.9,<3",
     "pydantic>=2.0,<3",

@@ -1174,3 +1174,25 @@ TTL).
   first provisioning, so a changed email reaches greenroom rows only
   if greenroom adds an email-sync on authenticated requests —
   optional, nothing breaks without it.
+---
+
+### 024 — SQLAlchemy Is Capped Below 2.1
+
+_(Shipped to `main` as Decision 018 in the PR #3 hotfix; renumber on merge.)_
+
+**Date:** 2026-10-01
+**Status:** Decided
+
+**Decision:**
+`pyproject.toml` pins `sqlalchemy>=2.0,<2.1`. SQLAlchemy 2.1 makes
+psycopg 3 the default driver for `postgresql://` URLs, but Knuckles
+ships `psycopg2-binary`; with 2.1 every database connection fails with
+`ModuleNotFoundError: No module named 'psycopg'` — in CI (first seen on
+PR #3) and, worse, on the next Railway deploy, which would take sign-in
+down for every tenant. Greenroom made the same call (its Decision 135).
+
+**Alternatives considered:** switching to psycopg 3 (`psycopg[binary]`
+plus `postgresql+psycopg://` URLs) — the right long-term move, but a
+driver migration deserves its own change and a deploy watched on its
+own, not a ride-along on an email fix. Lift the cap as part of that
+migration.
