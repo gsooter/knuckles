@@ -22,10 +22,10 @@ from flask import Flask
 from flask.testing import FlaskClient
 from sqlalchemy.orm import Session
 
-import knuckles.api.v1.magic_link as magic_link_route_mod
 import knuckles.core.app_client_auth as app_client_auth_mod
 import knuckles.core.cors as cors_mod
 import knuckles.core.database as database_mod
+import knuckles.services.magic_link as magic_link_service_mod
 from knuckles.app import create_app
 from knuckles.core.jwt import issue_access_token
 from knuckles.core.rate_limit import magic_link_limiter
@@ -297,7 +297,7 @@ def test_magic_link_rate_limit_returns_429(
 ) -> None:
     """Once the per-email budget is exhausted, ``/start`` returns 429."""
     monkeypatch.setattr(
-        magic_link_route_mod, "get_default_sender", lambda: _SilentSender()
+        magic_link_service_mod, "get_default_sender", lambda **_: _SilentSender()
     )
 
     # Exhaust the limiter for this email.
@@ -329,7 +329,7 @@ def test_magic_link_start_rejects_unregistered_redirect(
 ) -> None:
     """A redirect URL outside the app-client's allowed origins is 422."""
     monkeypatch.setattr(
-        magic_link_route_mod, "get_default_sender", lambda: _SilentSender()
+        magic_link_service_mod, "get_default_sender", lambda **_: _SilentSender()
     )
     response = client.post(
         "/v1/auth/magic-link/start",

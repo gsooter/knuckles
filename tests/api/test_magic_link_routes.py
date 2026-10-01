@@ -16,10 +16,11 @@ from flask import Flask
 from flask.testing import FlaskClient
 from sqlalchemy.orm import Session
 
-import knuckles.api.v1.magic_link as magic_link_route_mod
 import knuckles.core.app_client_auth as app_client_auth_mod
 import knuckles.core.database as database_mod
+import knuckles.services.magic_link as magic_link_service_mod
 from knuckles.app import create_app
+from knuckles.data.repositories import auth as repo
 
 
 class _FakeEmailSender:
@@ -33,6 +34,8 @@ class _FakeEmailSender:
     def __init__(self) -> None:
         """Initialize an empty send log."""
         self.sent: list[tuple[str, str, str, str | None]] = []
+        # Credentials the service asked the sender factory for, per send.
+        self.built_with: list[dict[str, str | None]] = []
 
     def send(
         self,
@@ -84,9 +87,27 @@ def app(
     """
     monkeypatch.setattr(database_mod, "get_db", lambda: db_session)
     monkeypatch.setattr(app_client_auth_mod.database, "get_db", lambda: db_session)
-    monkeypatch.setattr(
-        magic_link_route_mod, "get_default_sender", lambda: email_sender
-    )
+
+    def build_sender(
+        *, api_key: str | None = None, from_address: str | None = None
+    ) -> _FakeEmailSender:
+        """Record the tenant credentials the service resolved, return the fake.
+
+        Args:
+            api_key: Tenant Resend key, or ``None`` to inherit.
+            from_address: Tenant From address, or ``None`` to inherit.
+
+        Returns:
+            The shared recording sender.
+        """
+        email_sender.built_with.append(
+            {"api_key": api_key, "from_address": from_address}
+        )
+        return email_sender
+
+    # Patched where the per-tenant lookup happens (the service), not the
+    # route: the route must not pick a sender itself.
+    monkeypatch.setattr(magic_link_service_mod, "get_default_sender", build_sender)
     yield create_app()
 
 
@@ -177,6 +198,39 @@ def test_start_magic_link_sends_email_and_returns_202(
     to, _subject, body, _from_name = email_sender.sent[0]
     assert to == "user@example.com"
     assert "http://localhost:3000/auth/verify?token=" in body
+
+
+def test_start_magic_link_uses_the_tenant_from_address(
+    client: FlaskClient,
+    app_client_creds: tuple[str, str],
+    email_sender: _FakeEmailSender,
+    db_session: Session,
+) -> None:
+    """Regression: a tenant's ``resend_from_email`` reaches the sender.
+
+    The route used to pass ``sender=get_default_sender()`` (operator
+    globals), so every tenant's configured From address was ignored and
+    mail always came from the operator address.
+    """
+    client_id, _ = app_client_creds
+    row = repo.get_app_client(db_session, client_id)
+    assert row is not None
+    row.resend_from_email = "Greenroom <signin@greenroom.live>"
+    db_session.flush()
+
+    response = client.post(
+        "/v1/auth/magic-link/start",
+        json={
+            "email": "user@example.com",
+            "redirect_url": "http://localhost:3000/auth/verify",
+        },
+        headers=_auth_headers(app_client_creds),
+    )
+
+    assert response.status_code == 202
+    assert email_sender.built_with == [
+        {"api_key": None, "from_address": "Greenroom <signin@greenroom.live>"}
+    ]
 
 
 def test_verify_magic_link_returns_token_pair(
