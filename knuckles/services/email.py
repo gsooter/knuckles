@@ -120,9 +120,7 @@ class ResendEmailSender:
             AppError: With code ``EMAIL_DELIVERY_FAILED`` if Resend
                 returns a non-2xx response or the HTTP call raises.
         """
-        from_header = (
-            f"{from_name} <{self._from_address}>" if from_name else self._from_address
-        )
+        from_header = _from_header(self._from_address, from_name)
         payload = {
             "from": from_header,
             "to": [to],
@@ -166,6 +164,27 @@ class ResendEmailSender:
                 ),
                 status_code=502,
             )
+
+
+def _from_header(address: str, from_name: str | None) -> str:
+    """Build the ``From`` header for one send.
+
+    A tenant's ``resend_from_email`` is stored as ``Name <address>``
+    and already carries its display name, so it is used as-is; only a
+    bare address (the operator default) is wrapped in ``from_name``.
+    Wrapping both produced ``Name <Name <address>>``, which Resend
+    rejects — the reason per-tenant senders never took effect.
+
+    Args:
+        address: The configured sender, bare or ``Name <address>``.
+        from_name: Display name for a bare address (the app name).
+
+    Returns:
+        The ``From`` header value.
+    """
+    if "<" in address or not from_name:
+        return address
+    return f"{from_name} <{address}>"
 
 
 class ConsoleEmailSender:
