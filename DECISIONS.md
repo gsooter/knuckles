@@ -928,3 +928,24 @@ also the only consuming-app maintainer in practice.
   sender. Hand credentials to the Knuckles operator for
   population into the `greenroom-prod` row.
 
+
+---
+
+### 018 — SQLAlchemy Is Capped Below 2.1
+
+**Date:** 2026-10-01
+**Status:** Decided
+
+**Decision:**
+`pyproject.toml` pins `sqlalchemy>=2.0,<2.1`. SQLAlchemy 2.1 makes
+psycopg 3 the default driver for `postgresql://` URLs, but Knuckles
+ships `psycopg2-binary`; with 2.1 every database connection fails with
+`ModuleNotFoundError: No module named 'psycopg'` — in CI (first seen on
+PR #3) and, worse, on the next Railway deploy, which would take sign-in
+down for every tenant. Greenroom made the same call (its Decision 135).
+
+**Alternatives considered:** switching to psycopg 3 (`psycopg[binary]`
+plus `postgresql+psycopg://` URLs) — the right long-term move, but a
+driver migration deserves its own change and a deploy watched on its
+own, not a ride-along on an email fix. Lift the cap as part of that
+migration.
