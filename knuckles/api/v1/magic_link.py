@@ -31,7 +31,6 @@ from knuckles.core.app_client_auth import (
 from knuckles.core.exceptions import RATE_LIMITED, AppError, ValidationError
 from knuckles.core.rate_limit import magic_link_limiter
 from knuckles.services import magic_link
-from knuckles.services.email import get_default_sender
 
 
 def _require_string_field(field: str) -> str:
@@ -90,7 +89,9 @@ def start_magic_link_route() -> tuple[Response, int]:
         email=email,
         app_client_id=app_client.client_id,
         redirect_url=redirect_url,
-        sender=get_default_sender(),
+        # No sender here: the service builds one from the tenant's
+        # resend_* columns (Decision #017). Passing the operator default
+        # made every tenant's From address silently ignored.
     )
     return jsonify({}), 202
 
