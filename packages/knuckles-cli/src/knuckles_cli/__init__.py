@@ -1,0 +1,3 @@
+"""Operator CLI for the Knuckles identity service."""
+
+__version__ = "0.1.0"

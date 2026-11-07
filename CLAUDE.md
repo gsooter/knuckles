@@ -153,6 +153,22 @@ knuckles/
     └── api/
 ```
 
+Alongside the service, `packages/` holds the client-side tools
+(Decisions #015 and #025). None of them import `knuckles/`; they reach
+it over HTTP only:
+
+```
+packages/
+├── knuckles-client-py/   # Python SDK (PyPI: knuckles-client)
+├── knuckles-client-ts/   # TypeScript SDK (@knuckles/client)
+└── knuckles-cli/         # Operator CLI (PyPI: knuckles-cli, binary `knuckles`)
+```
+
+The same docstring, type-hint, and test-first rules apply in
+`packages/`. The CLI is the default way to provision tenants. It wraps
+the admin API, so a new admin capability lands in the service first
+and then gets a CLI command.
+
 **No `services/connected_services.py`. No `api/v1/services.py`.** The
 absence of those files is load-bearing — see the Hard Rule.
 
@@ -207,6 +223,10 @@ header (the **admin** column):
 - `PATCH /v1/admin/app-clients/<client_id>` — admin (tenant config)
 - `POST /v1/admin/app-clients/<client_id>/rotate-secret` — admin
 - `PUT  /v1/admin/app-clients/<client_id>/origins` — admin
+
+The `knuckles` CLI (`packages/knuckles-cli/`) is the recommended
+client for this surface: `login`, `init`, `apps *`, `providers *`,
+`doctor` (Decision #025).
 
 (Out-of-band maintenance lives in scripts, not HTTP:
 `scripts/cleanup_magic_links.py`, `scripts/cleanup_refresh_tokens.py`
@@ -336,11 +356,12 @@ tenant fails loudly instead of mixing credentials).
 
 Per-tenant config lives on `app_clients` columns instead of env vars
 (Decision #017). A tenant is **created** with
-`scripts/register_app_client.py` (or `POST /v1/admin/app-clients`),
-then its tenant-shaped fields — Resend sender, Google OAuth client,
-Apple OAuth credentials, WebAuthn relying party — are **populated**
-via `scripts/configure_app_client.py` or
-`PATCH /v1/admin/app-clients/<id>`. Secret-bearing columns
+`knuckles init` (or `POST /v1/admin/app-clients`; the break-glass
+`scripts/register_app_client.py` still works), then its tenant-shaped
+fields — Resend sender, Google OAuth client, Apple OAuth credentials,
+WebAuthn relying party — are **populated** via `knuckles providers *`
+(or `PATCH /v1/admin/app-clients/<id>` /
+`scripts/configure_app_client.py`). Secret-bearing columns
 (`resend_api_key`, `google_oauth_client_secret`,
 `apple_oauth_private_key`) are encrypted at rest via the
 `EncryptedText` SQLAlchemy type decorator.

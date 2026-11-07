@@ -1196,3 +1196,64 @@ plus `postgresql+psycopg://` URLs) — the right long-term move, but a
 driver migration deserves its own change and a deploy watched on its
 own, not a ride-along on an email fix. Lift the cap as part of that
 migration.
+
+### 025 — An Operator CLI (`knuckles`) Ships As A Pure Admin-API Client
+
+**Date:** 2026-11-07
+**Status:** Decided (Phase 1 of the agent-first setup roadmap)
+
+**Decision:** A new package, `packages/knuckles-cli/` (PyPI
+`knuckles-cli`, console script `knuckles`), is the default way to
+provision and check tenants. It talks to a running Knuckles over HTTP
+only: the public discovery endpoints plus the Decision #021 admin
+API. It never imports the `knuckles` service package and never
+touches the database, so it works against any deployment with
+`KNUCKLES_ADMIN_TOKEN` set, from a laptop or a coding agent.
+
+Commands: `login`/`logout` (profiles stored in
+`~/.config/knuckles/config.json`, mode 0600, with `KNUCKLES_URL` /
+`KNUCKLES_ADMIN_TOKEN` env overrides); `init` (create a tenant and
+write `KNUCKLES_URL` / `KNUCKLES_CLIENT_ID` / `KNUCKLES_CLIENT_SECRET`
+into the consuming app's `.env`); `apps list|show|create|rotate-secret|set-origins`;
+`providers google|apple|email|passkey|clear`, which accept the files
+the provider consoles actually hand you (Google's
+`client_secret_*.json`, Apple's `AuthKey_<KEYID>.p8`) and validate
+them locally before upload; and `doctor`, which checks the server
+(health, discovery `issuer`, JWKS, HTTPS) and each tenant (origins,
+atomic config groups per Decision #020, passkey rp_id/origin fit).
+Every command takes `--json` and emits the API's `{data}` / `{error}`
+envelope so agents can parse results; `doctor` exits non-zero on any
+failing check.
+
+Secrets never travel through argv (shell history, `ps`): the admin
+token, Resend API key, and Google client secret come from a file,
+stdin, an env var, or a hidden prompt.
+
+**Rationale:** Setup friction, not missing features, is what blocks
+tenant #2. The operator scripts need a checkout, a `DATABASE_URL`, and
+the Fernet key on the operator's machine; the admin API removed that
+need but left raw `curl`. A CLI over the admin API is the smallest
+step that makes setup scriptable by a coding agent, and it is the
+substrate the planned MCP server (Phase 2) wraps.
+
+**Alternatives considered:**
+- **Extend `scripts/*.py`** — rejected. They need database access and
+  the encryption key locally; that is break-glass, not onboarding.
+- **Build the CLI on the `knuckles-client` SDK's `admin` namespace** —
+  rejected for now. The SDK requires app-client credentials an
+  operator does not have, the admin namespace is unreleased, and
+  `doctor` needs unauthenticated discovery calls the SDK does not
+  expose. The CLI's HTTP layer is ~100 lines; revisit if it grows.
+- **A Node CLI** — rejected. The service, scripts, and primary SDK are
+  Python; one toolchain for the operator side.
+
+**Consequences:**
+- No new server routes and no new tables: the API surface list in
+  CLAUDE.md is unchanged.
+- CI gains a `cli` job mirroring the SDK job (black, ruff, mypy
+  strict, pytest).
+- `doctor` can only see what the admin API exposes: encrypted values
+  appear as `*_configured` booleans, and whether a NULL group inherits
+  the operator env fallback is server-side state, so empty groups are
+  reported as warnings, not failures. Resend domain verification is
+  checked once, when `providers email` has the key in hand.

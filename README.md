@@ -17,10 +17,11 @@ OAuth/JWT/WebAuthn expert.
 knuckles/                    # The Knuckles Flask service (self-hosted today)
 packages/
 ├── knuckles-client-py/      # Python SDK on PyPI as `knuckles-client`
-└── knuckles-client-ts/      # TypeScript SDK (source; not yet on npm)
+├── knuckles-client-ts/      # TypeScript SDK (source; not yet on npm)
+└── knuckles-cli/            # Operator CLI: `knuckles init`, `providers`, `doctor`
 docs/                        # Beginner-friendly docs site (GitHub Pages)
 examples/                    # Next.js, Express, Flask middleware examples
-scripts/                     # Admin CLI (register an app_client, etc.)
+scripts/                     # Break-glass maintenance scripts (direct DB access)
 ```
 
 ## Today's architecture: self-hosted service + SDK
@@ -34,6 +35,19 @@ network call.
 The full setup (15 minutes from scratch) is at
 <https://gsooter.github.io/knuckles/setup>. Apple and Google API key
 walkthroughs are step-by-step there.
+
+Once the server is up, add each site with the operator CLI:
+
+```bash
+pip install knuckles-cli
+knuckles login --url https://auth.example.com
+knuckles init my-site --name "My Site" --origin https://my-site.com --env-file ../my-site/.env
+knuckles providers google my-site --client-secret-json client_secret.json
+knuckles doctor my-site
+```
+
+See [`packages/knuckles-cli`](packages/knuckles-cli/README.md) or the
+[CLI guide](https://gsooter.github.io/knuckles/cli).
 
 ## Roadmap
 
