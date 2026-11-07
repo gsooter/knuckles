@@ -31,7 +31,14 @@ tags:
   - name: Passkey
     description: WebAuthn passkey registration, sign-in, and management
   - name: Session
-    description: Refresh, logout, current user
+    description: Refresh, logout, current user, session visibility
+  - name: Account
+    description: Self-service profile, linked providers, email change
+  - name: Admin
+    description: |
+      Operator provisioning surface for `app_clients`. Exists only when
+      `KNUCKLES_ADMIN_TOKEN` is set — every `/v1/admin/*` route returns
+      404 (as if it did not exist) when that env var is unset.
   - name: Operational
     description: Health probe
 
@@ -42,17 +49,33 @@ paths:
   /health:
     get:
       tags: [Operational]
-      summary: Liveness probe for load balancers
+      summary: Liveness + database probe for load balancers
+      description: |
+        Performs a one-query database round trip so a dead database or
+        exhausted pool reports 503 instead of green while every real
+        request fails.
       security: []
       responses:
         "200":
-          description: OK
+          description: Service and database healthy
           content:
             application/json:
               schema:
                 type: object
+                required: [status, database]
                 properties:
                   status: { type: string, enum: [ok] }
+                  database: { type: string, enum: [ok] }
+        "503":
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, database]
+                properties:
+                  status: { type: string, enum: [degraded] }
+                  database: { type: string, enum: [unreachable] }
 
   /.well-known/jwks.json:
     get:
@@ -416,10 +439,15 @@ paths:
   /v1/logout/all:
     post:
       tags: [Session]
-      summary: Revoke every refresh token for the signed-in user
+      summary: Revoke the signed-in user's refresh tokens with this app
+      description: |
+        Revocation is **scoped to the calling app client** — the user's
+        sessions with other consuming apps are untouched. Dual-auth:
+        requires both client headers and a bearer token whose `aud`
+        matches the calling `X-Client-Id` (mismatch → `INVALID_TOKEN`).
       security:
         - clientCredentials: []
-        - bearerAuth: []
+          bearerAuth: []
       responses:
         "200":
           description: Count of revoked rows
@@ -437,9 +465,12 @@ paths:
     get:
       tags: [Session]
       summary: Current user's profile
+      description: |
+        Dual-auth: client headers plus a bearer token whose `aud`
+        matches the calling `X-Client-Id` (mismatch → `INVALID_TOKEN`).
       security:
         - clientCredentials: []
-        - bearerAuth: []
+          bearerAuth: []
       responses:
         "200":
           description: User profile
@@ -449,6 +480,452 @@ paths:
                 type: object
                 properties:
                   data: { $ref: "#/components/schemas/UserProfile" }
+    patch:
+      tags: [Account]
+      summary: Update the current user's profile
+      description: |
+        Partial update of `display_name` and/or `avatar_url`. At least
+        one field is required; `null` clears a field; unknown keys are
+        rejected. Dual-auth: the bearer's `aud` must match the calling
+        `X-Client-Id` (mismatch → `INVALID_TOKEN`).
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                display_name:
+                  type: [string, "null"]
+                avatar_url:
+                  type: [string, "null"]
+      responses:
+        "200":
+          description: Updated profile (same shape as `GET /v1/me`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/UserProfile" }
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    delete:
+      tags: [Account]
+      summary: Permanently delete the current user's account
+      description: |
+        Account-wide: sessions with **every** tenant are revoked and
+        the user row is removed — a still-valid access token maps to
+        `USER_NOT_FOUND` on any subsequent call. Dual-auth: the
+        bearer's `aud` must match the calling `X-Client-Id`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      responses:
+        "204":
+          description: Account deleted
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/me/providers:
+    get:
+      tags: [Account]
+      summary: List the current user's linked OAuth providers
+      description: |
+        Returns safe fields only — provider access/refresh tokens, the
+        raw profile, and the provider user id never leave the database.
+        Dual-auth: the bearer's `aud` must match the calling
+        `X-Client-Id`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      responses:
+        "200":
+          description: Linked providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/LinkedProvider" }
+
+  /v1/me/providers/{provider}:
+    delete:
+      tags: [Account]
+      summary: Unlink an OAuth provider from the current user's account
+      description: |
+        Dual-auth: the bearer's `aud` must match the calling
+        `X-Client-Id`. Unknown provider names and absent links both
+        return `PROVIDER_NOT_FOUND`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: Provider name (`google` or `apple`).
+          schema: { type: string }
+      responses:
+        "204":
+          description: Provider unlinked
+        "404":
+          description: Unknown provider name or no such link (`PROVIDER_NOT_FOUND`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/me/email/start:
+    post:
+      tags: [Account]
+      summary: Begin a verified email change
+      description: |
+        Sends a confirmation link to the new address. Returns 202
+        regardless of whether the address is already registered — no
+        account-enumeration signal. Shares the magic-link per-address
+        rate limit (`RATE_LIMITED` 429 with a `Retry-After` header).
+        Dual-auth: the bearer's `aud` must match the calling
+        `X-Client-Id`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_email, redirect_url]
+              properties:
+                new_email: { type: string, format: email }
+                redirect_url:
+                  type: string
+                  format: uri
+                  description: |
+                    Destination URL on the consuming app's frontend.
+                    Origin must be in the calling app-client's
+                    `allowed_origins`.
+      responses:
+        "202":
+          description: Confirmation email queued
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/me/email/verify:
+    post:
+      tags: [Account]
+      summary: Complete an email change from the confirmation link
+      description: |
+        Client-auth only — the user arrives from an email link without
+        a bearer in hand; the one-time token (bound to the user at mint
+        time) is the proof of identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: Raw token from the email URL. }
+      responses:
+        "200":
+          description: Email changed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      email: { type: string, format: email }
+        "400":
+          description: Token invalid, expired, or already used
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "401": { $ref: "#/components/responses/InvalidClient" }
+        "409":
+          description: The new address is already registered (`EMAIL_IN_USE`)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/sessions:
+    get:
+      tags: [Session]
+      summary: List the current user's active sessions with this app
+      description: |
+        Lists active refresh tokens scoped to the calling app client.
+        Refresh-token rotation replaces rows, so the ids change on
+        every `/v1/token/refresh` — treat this as a point-in-time view,
+        not a stable session registry. Dual-auth: the bearer's `aud`
+        must match the calling `X-Client-Id`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      responses:
+        "200":
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/SessionDescriptor" }
+
+  /v1/sessions/{sessionId}:
+    delete:
+      tags: [Session]
+      summary: Revoke one of the current user's sessions by id
+      description: |
+        Scoped to the calling user and app client. Dual-auth: the
+        bearer's `aud` must match the calling `X-Client-Id`.
+      security:
+        - clientCredentials: []
+          bearerAuth: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Session revoked
+        "404":
+          description: |
+            `SESSION_NOT_FOUND` — id malformed, unknown, owned by
+            another user or tenant, or already consumed/expired.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /v1/admin/app-clients:
+    post:
+      tags: [Admin]
+      summary: Register a new app client
+      description: |
+        Returns the plaintext client secret **exactly once** — only its
+        SHA-256 hash is persisted. The admin surface 404s entirely when
+        `KNUCKLES_ADMIN_TOKEN` is unset.
+      security:
+        - adminToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id, app_name]
+              properties:
+                client_id:
+                  type: string
+                  description: |
+                    Slug — lowercase alphanumerics and hyphens, no
+                    leading/trailing hyphen, 3-64 characters. Becomes
+                    the JWT `aud` claim.
+                app_name: { type: string }
+                allowed_origins:
+                  type: array
+                  items: { type: string, format: uri }
+                  description: Defaults to an empty list.
+      responses:
+        "201":
+          description: Created — includes the one-time plaintext secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    allOf:
+                      - $ref: "#/components/schemas/AppClient"
+                      - type: object
+                        properties:
+                          client_secret:
+                            type: string
+                            description: Shown exactly once.
+        "404": { $ref: "#/components/responses/AdminDisabled" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    get:
+      tags: [Admin]
+      summary: List every registered app client (redacted)
+      description: |
+        Encrypted columns appear only as `*_configured` booleans. The
+        admin surface 404s entirely when `KNUCKLES_ADMIN_TOKEN` is
+        unset.
+      security:
+        - adminToken: []
+      responses:
+        "200":
+          description: All app clients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/AppClient" }
+        "404": { $ref: "#/components/responses/AdminDisabled" }
+
+  /v1/admin/app-clients/{clientId}:
+    get:
+      tags: [Admin]
+      summary: Fetch a single app client (redacted)
+      description: |
+        The admin surface 404s entirely when `KNUCKLES_ADMIN_TOKEN` is
+        unset.
+      security:
+        - adminToken: []
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: App client
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AppClient" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Admin]
+      summary: Update tenant-config columns on an app client
+      description: |
+        Body keys are tenant-config column names; values of `""` or
+        `null` clear the column back to env-var fallback. Changing an
+        established `webauthn_rp_id` while passkeys exist is rejected
+        unless `force_webauthn_rp_id: true` acknowledges that every
+        passkey registered against the prior value is invalidated. The
+        admin surface 404s entirely when `KNUCKLES_ADMIN_TOKEN` is
+        unset.
+      security:
+        - adminToken: []
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                resend_from_email: { type: [string, "null"] }
+                resend_api_key: { type: [string, "null"] }
+                google_oauth_client_id: { type: [string, "null"] }
+                google_oauth_client_secret: { type: [string, "null"] }
+                apple_oauth_client_id: { type: [string, "null"] }
+                apple_oauth_team_id: { type: [string, "null"] }
+                apple_oauth_key_id: { type: [string, "null"] }
+                apple_oauth_private_key: { type: [string, "null"] }
+                webauthn_rp_id: { type: [string, "null"] }
+                webauthn_rp_name: { type: [string, "null"] }
+                webauthn_origin: { type: [string, "null"] }
+                force_webauthn_rp_id:
+                  type: boolean
+                  default: false
+      responses:
+        "200":
+          description: Updated app client (redacted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AppClient" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /v1/admin/app-clients/{clientId}/rotate-secret:
+    post:
+      tags: [Admin]
+      summary: Mint a new client secret
+      description: |
+        Returns the new plaintext secret **exactly once** — only its
+        hash is persisted, so it cannot be recovered later. The admin
+        surface 404s entirely when `KNUCKLES_ADMIN_TOKEN` is unset.
+      security:
+        - adminToken: []
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: New plaintext secret
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    required: [client_id, client_secret]
+                    properties:
+                      client_id: { type: string }
+                      client_secret:
+                        type: string
+                        description: Shown exactly once.
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/admin/app-clients/{clientId}/origins:
+    put:
+      tags: [Admin]
+      summary: Replace the entire allowed-origins list
+      description: |
+        Origins are canonicalized (default ports dropped, paths
+        stripped) and de-duplicated. The admin surface 404s entirely
+        when `KNUCKLES_ADMIN_TOKEN` is unset.
+      security:
+        - adminToken: []
+      parameters:
+        - name: clientId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [allowed_origins]
+              properties:
+                allowed_origins:
+                  type: array
+                  items: { type: string, format: uri }
+      responses:
+        "200":
+          description: Updated app client (redacted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AppClient" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
 
 components:
   securitySchemes:
@@ -464,7 +941,20 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: RS256 JWT issued by Knuckles. Validate locally via JWKS.
+      description: |
+        RS256 JWT issued by Knuckles. Validate locally via JWKS. On
+        dual-auth endpoints (client credentials + bearer together) the
+        token's `aud` claim must match the calling `X-Client-Id`;
+        mismatch fails with `INVALID_TOKEN`.
+    adminToken:
+      type: apiKey
+      in: header
+      name: X-Admin-Token
+      description: |
+        Operator token for the `/v1/admin/*` provisioning surface,
+        compared in constant time against `KNUCKLES_ADMIN_TOKEN`. When
+        that env var is unset, every admin route returns 404 as if it
+        did not exist.
 
   responses:
     InvalidClient:
@@ -479,6 +969,18 @@ components:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
     RateLimited:
       description: Per-key budget exceeded
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: No matching resource
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    AdminDisabled:
+      description: |
+        `KNUCKLES_ADMIN_TOKEN` is unset — the admin surface does not
+        exist (or no app client matched).
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -499,7 +1001,6 @@ components:
                 - TOKEN_EXPIRED
                 - INVALID_CLIENT
                 - INVALID_SCOPE
-                - INVALID_GRANT
                 - USER_NOT_FOUND
                 - MAGIC_LINK_INVALID
                 - MAGIC_LINK_EXPIRED
@@ -513,22 +1014,17 @@ components:
                 - REFRESH_TOKEN_EXPIRED
                 - REFRESH_TOKEN_REUSED
                 - RATE_LIMITED
+                - TENANT_CONFIG_INCOMPLETE
+                - SESSION_NOT_FOUND
+                - PROVIDER_NOT_FOUND
+                - EMAIL_IN_USE
+                - APP_CLIENT_NOT_FOUND
+                - NOT_FOUND
                 - VALIDATION_ERROR
                 - UNAUTHORIZED
                 - FORBIDDEN
                 - INTERNAL_SERVER_ERROR
             message: { type: string }
-        meta:
-          type: object
-          properties:
-            request_id:
-              type: string
-              format: uuid
-              description: |
-                Per-request correlation id. Mirrored in the
-                `X-Request-Id` response header on every request.
-                Customers quote this when reporting issues so the
-                operator can grep server logs for the full context.
 
     JWKS:
       type: object
@@ -634,3 +1130,54 @@ components:
         display_name: { type: [string, "null"] }
         avatar_url: { type: [string, "null"] }
         app_client_id: { type: string }
+
+    LinkedProvider:
+      type: object
+      required: [provider, created_at, scopes]
+      properties:
+        provider: { type: string, enum: [google, apple] }
+        created_at: { type: string, format: date-time }
+        scopes:
+          type: [string, "null"]
+          description: Space-delimited scopes granted at the last login.
+
+    SessionDescriptor:
+      type: object
+      required: [id, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            `refresh_tokens.id`. Rotation replaces rows, so this
+            changes on every refresh.
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
+    AppClient:
+      type: object
+      description: |
+        Redacted app-client row. Encrypted columns (Resend API key,
+        Google client secret, Apple private key) are exposed only as
+        `*_configured` booleans; the `client_secret_hash` never
+        appears. A `null` config column means the env-var fallback
+        applies.
+      required: [client_id, app_name, allowed_origins, created_at]
+      properties:
+        client_id: { type: string }
+        app_name: { type: string }
+        allowed_origins:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+        resend_from_email: { type: [string, "null"] }
+        google_oauth_client_id: { type: [string, "null"] }
+        apple_oauth_client_id: { type: [string, "null"] }
+        apple_oauth_team_id: { type: [string, "null"] }
+        apple_oauth_key_id: { type: [string, "null"] }
+        webauthn_rp_id: { type: [string, "null"] }
+        webauthn_rp_name: { type: [string, "null"] }
+        webauthn_origin: { type: [string, "null"] }
+        resend_api_key_configured: { type: boolean }
+        google_oauth_client_secret_configured: { type: boolean }
+        apple_oauth_private_key_configured: { type: boolean }

@@ -97,7 +97,7 @@ def request_context() -> dict[str, Any]:
         client = getattr(g, "app_client", None)
         if client is not None:
             ctx["app_client_id"] = getattr(client, "client_id", None)
-        user_id = getattr(g, "user_id", None)
+        user_id = getattr(g, "current_user_id", None)
         if user_id is not None:
             ctx["user_id"] = str(user_id)
         return {k: v for k, v in ctx.items() if v is not None}

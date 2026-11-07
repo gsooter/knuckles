@@ -11,13 +11,19 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from typing import ClassVar
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from knuckles_client import KnucklesClient, KnucklesTokenError
+from knuckles_client import (
+    KnucklesClient,
+    KnucklesTokenError,
+    KnucklesTokenExpiredError,
+    __version__,
+)
 from knuckles_client._jwks import JwksVerifier
 
 from .conftest import BASE_URL, CLIENT_ID, CLIENT_SECRET
@@ -165,6 +171,36 @@ def test_verify_rejects_expired_token() -> None:
         client.verify_access_token(token)
 
 
+def test_verify_raises_typed_expired_error_with_cause_chain() -> None:
+    """Expiry raises :class:`KnucklesTokenExpiredError` from the jwt cause.
+
+    The subclass relationship and the ``__cause__`` chain to
+    :class:`jwt.ExpiredSignatureError` are both part of the contract.
+    """
+    private = _make_key()
+    client = _client_with_key(private.public_key())
+    token = _mint_token(
+        private_key=private,
+        issuer=BASE_URL,
+        audience=CLIENT_ID,
+        expires_in=-10,
+    )
+    with pytest.raises(KnucklesTokenExpiredError) as exc_info:
+        client.verify_access_token(token)
+    assert isinstance(exc_info.value, KnucklesTokenError)
+    assert isinstance(exc_info.value.__cause__, jwt.ExpiredSignatureError)
+
+
+def test_non_expiry_failures_do_not_raise_expired_error() -> None:
+    """A wrong-audience token raises the base class, not the subclass."""
+    private = _make_key()
+    client = _client_with_key(private.public_key())
+    token = _mint_token(private_key=private, issuer=BASE_URL, audience="other-app")
+    with pytest.raises(KnucklesTokenError) as exc_info:
+        client.verify_access_token(token)
+    assert not isinstance(exc_info.value, KnucklesTokenExpiredError)
+
+
 def test_verify_rejects_token_signed_by_unknown_key() -> None:
     """A token signed with a key NOT in the JWKS is rejected."""
     trusted = _make_key()
@@ -173,6 +209,57 @@ def test_verify_rejects_token_signed_by_unknown_key() -> None:
     token = _mint_token(private_key=intruder, issuer=BASE_URL, audience=CLIENT_ID)
     with pytest.raises(KnucklesTokenError):
         client.verify_access_token(token)
+
+
+class _CapturingJWKClient:
+    """Drop-in for :class:`jwt.PyJWKClient` that records its kwargs."""
+
+    last_uri: ClassVar[str | None] = None
+    last_kwargs: ClassVar[dict[str, object]] = {}
+
+    def __init__(self, uri: str, **kwargs: object) -> None:
+        """Record the constructor arguments on the class.
+
+        Args:
+            uri: The JWKS URI the verifier passed.
+            **kwargs: Every keyword argument the verifier passed.
+        """
+        type(self).last_uri = uri
+        type(self).last_kwargs = dict(kwargs)
+
+
+def test_default_user_agent_and_timeout_reach_pyjwkclient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client wires a versioned User-Agent + 10s timeout into PyJWKClient.
+
+    urllib's stock ``Python-urllib/x.y`` User-Agent is blocked by
+    common WAF rules, so the SDK defaults its own.
+    """
+    monkeypatch.setattr(jwt, "PyJWKClient", _CapturingJWKClient)
+    KnucklesClient(base_url=BASE_URL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET)
+    headers = _CapturingJWKClient.last_kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["User-Agent"] == f"knuckles-client-py/{__version__}"
+    assert _CapturingJWKClient.last_kwargs["timeout"] == 10
+    assert _CapturingJWKClient.last_uri == f"{BASE_URL}/.well-known/jwks.json"
+
+
+def test_jwks_headers_override_default_user_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied User-Agent wins; extra headers pass through."""
+    monkeypatch.setattr(jwt, "PyJWKClient", _CapturingJWKClient)
+    KnucklesClient(
+        base_url=BASE_URL,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        jwks_headers={"User-Agent": "my-app/1.0", "X-Custom": "yes"},
+    )
+    headers = _CapturingJWKClient.last_kwargs["headers"]
+    assert isinstance(headers, dict)
+    assert headers["User-Agent"] == "my-app/1.0"
+    assert headers["X-Custom"] == "yes"
 
 
 def test_serialization_import_keeps_pem_helpers_available() -> None:

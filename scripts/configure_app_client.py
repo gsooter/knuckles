@@ -50,7 +50,9 @@ from pathlib import Path
 from typing import Any
 
 from knuckles.core.database import get_session_factory
+from knuckles.core.exceptions import AppError
 from knuckles.data.repositories import auth as repo
+from knuckles.services import app_clients as app_clients_service
 
 
 def _read_private_key(path: str) -> str:
@@ -131,6 +133,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Acknowledge the consequences of changing webauthn_rp_id.",
     )
 
+    # Credential / origin management (same service functions as the
+    # /v1/admin API).
+    parser.add_argument(
+        "--rotate-secret",
+        action="store_true",
+        help=(
+            "Mint a new client_secret for this tenant and print the "
+            "plaintext exactly once. The old secret stops working "
+            "immediately."
+        ),
+    )
+    parser.add_argument(
+        "--set-origin",
+        action="append",
+        metavar="URL",
+        help=(
+            "Replace the entire allowed_origins list with the given "
+            "origin(s). Repeat for multiple origins."
+        ),
+    )
+
     return parser
 
 
@@ -208,14 +231,14 @@ def main(argv: list[str] | None = None) -> int:
             :data:`sys.argv` slicing the program name.
 
     Returns:
-        Exit code: ``0`` on success; ``1`` for missing tenant or
-        webauthn-rp-id guard refusal.
+        Exit code: ``0`` on success; ``1`` for missing tenant,
+        webauthn-rp-id guard refusal, or an invalid origin.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
     updates = _collect_updates(args)
-    if not updates:
+    if not updates and not args.rotate_secret and not args.set_origin:
         print("No fields supplied; nothing to update.", file=sys.stderr)
         return 1
 
@@ -230,25 +253,52 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    new_secret: str | None = None
+    new_origins: list[str] | None = None
     session_factory = get_session_factory()
     with session_factory() as session:
-        client = repo.update_app_client_config(
-            session,
-            client_id=args.client_id,
-            **updates,
-        )
-        if client is None:
-            print(
-                f"No app_client found with client_id={args.client_id!r}.",
-                file=sys.stderr,
+        if updates:
+            client = repo.update_app_client_config(
+                session,
+                client_id=args.client_id,
+                **updates,
             )
+            if client is None:
+                print(
+                    f"No app_client found with client_id={args.client_id!r}.",
+                    file=sys.stderr,
+                )
+                return 1
+        try:
+            if args.rotate_secret:
+                new_secret = app_clients_service.rotate_secret(
+                    session, client_id=args.client_id
+                )
+            if args.set_origin:
+                origin_client = app_clients_service.set_origins(
+                    session,
+                    client_id=args.client_id,
+                    allowed_origins=list(args.set_origin),
+                )
+                new_origins = list(origin_client.allowed_origins)
+        except AppError as exc:
+            print(exc.message, file=sys.stderr)
             return 1
         session.commit()
 
-    print(f"Updated {args.client_id}:")
-    for column, value in updates.items():
-        rendered: Any = _redact(value) if column in _SECRET_COLUMNS else value
-        print(f"  {column}: {rendered!s}")
+    if updates:
+        print(f"Updated {args.client_id}:")
+        for column, value in updates.items():
+            rendered: Any = _redact(value) if column in _SECRET_COLUMNS else value
+            print(f"  {column}: {rendered!s}")
+    if new_origins is not None:
+        print(f"Replaced allowed_origins for {args.client_id}:")
+        for origin in new_origins:
+            print(f"  {origin}")
+    if new_secret is not None:
+        print(f"Rotated client_secret for {args.client_id}:")
+        print(f"  client_secret: {new_secret}")
+        print("Save the secret now — it cannot be recovered.")
     return 0
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from typing import Any
 from urllib.parse import urlencode
 
@@ -41,6 +42,7 @@ from knuckles.data.models import OAuthProvider
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 from knuckles.services._oauth_upsert import upsert_oauth_user
+from knuckles.services._tenant_config import resolve_tenant_fields
 
 _logger = get_logger("services.apple_oauth")
 
@@ -52,6 +54,7 @@ _SCOPES = "name email"
 _STATE_PURPOSE = "apple_oauth"
 _STATE_TTL_SECONDS = 10 * 60
 _HTTP_TIMEOUT_SECONDS = 10
+_CLOCK_SKEW_LEEWAY_SECONDS = 60
 _CLIENT_SECRET_TTL_SECONDS = 180 * 24 * 60 * 60  # Apple caps at 6 months.
 
 
@@ -88,23 +91,40 @@ class _AppleConfig:
 def _resolve_config(session: Session, app_client_id: str) -> _AppleConfig:
     """Look up the tenant's Apple OAuth config, falling back to env.
 
+    The four fields are an atomic group: a tenant that sets any must
+    set all, so a tenant Services ID never pairs with the operator's
+    signing key (see :mod:`knuckles.services._tenant_config`).
+
     Args:
         session: Active SQLAlchemy session for the AppClient lookup.
         app_client_id: ``app_clients.client_id`` of the caller.
 
     Returns:
         A :class:`_AppleConfig` populated from the per-tenant columns,
-        with operator env vars filling in any nulls.
+        with operator env vars filling in a fully-NULL group.
+
+    Raises:
+        AppError: With code ``TENANT_CONFIG_INCOMPLETE`` when the
+            group is partially configured or the env fallback has
+            been retired.
     """
     settings = get_settings()
     client = repo.get_app_client(session, app_client_id)
+    resolved = resolve_tenant_fields(
+        client,
+        group="apple_oauth",
+        fields={
+            "apple_oauth_client_id": settings.apple_oauth_client_id,
+            "apple_oauth_team_id": settings.apple_oauth_team_id,
+            "apple_oauth_key_id": settings.apple_oauth_key_id,
+            "apple_oauth_private_key": settings.apple_oauth_private_key,
+        },
+    )
     return _AppleConfig(
-        client_id=(client and client.apple_oauth_client_id)
-        or settings.apple_oauth_client_id,
-        team_id=(client and client.apple_oauth_team_id) or settings.apple_oauth_team_id,
-        key_id=(client and client.apple_oauth_key_id) or settings.apple_oauth_key_id,
-        private_key=(client and client.apple_oauth_private_key)
-        or settings.apple_oauth_private_key,
+        client_id=resolved["apple_oauth_client_id"],
+        team_id=resolved["apple_oauth_team_id"],
+        key_id=resolved["apple_oauth_key_id"],
+        private_key=resolved["apple_oauth_private_key"],
     )
 
 
@@ -455,11 +475,33 @@ def _parse_oauth_error(response: requests.Response) -> tuple[str | None, str | N
     )
 
 
+@lru_cache(maxsize=1)
+def _apple_jwks_client() -> jwt.PyJWKClient:
+    """Return the process-singleton JWKS client for Apple's keys.
+
+    Built once per process so an Apple sign-in does not pay an HTTPS
+    fetch of Apple's JWKS on every request. The explicit ``timeout``
+    keeps a stalled fetch inside the request budget (PyJWT's default
+    is 30s — exactly the gunicorn worker-kill threshold), and the
+    explicit User-Agent avoids the WAF rules that block PyJWKClient's
+    default ``Python-urllib`` identity.
+
+    Returns:
+        A caching :class:`jwt.PyJWKClient` bound to Apple's JWKS URL.
+    """
+    return jwt.PyJWKClient(
+        _JWKS_URL,
+        cache_keys=True,
+        timeout=_HTTP_TIMEOUT_SECONDS,
+        headers={"User-Agent": "knuckles"},
+    )
+
+
 def _verify_id_token(config: _AppleConfig, id_token: str) -> dict[str, Any]:
     """Verify Apple's id_token signature, issuer, and audience.
 
-    Uses :class:`jwt.PyJWKClient` to fetch and cache Apple's public
-    keys from :data:`_JWKS_URL`.
+    Uses the cached :func:`_apple_jwks_client` to resolve Apple's
+    public keys from :data:`_JWKS_URL`, tolerating 60s of clock skew.
 
     Args:
         config: Resolved Apple OAuth credentials — supplies the
@@ -474,8 +516,7 @@ def _verify_id_token(config: _AppleConfig, id_token: str) -> dict[str, Any]:
             failure (signature, issuer, audience, or expiry).
     """
     try:
-        jwks_client = jwt.PyJWKClient(_JWKS_URL)
-        signing_key = jwks_client.get_signing_key_from_jwt(id_token)
+        signing_key = _apple_jwks_client().get_signing_key_from_jwt(id_token)
         return dict(
             jwt.decode(
                 id_token,
@@ -483,6 +524,7 @@ def _verify_id_token(config: _AppleConfig, id_token: str) -> dict[str, Any]:
                 algorithms=["RS256"],
                 audience=config.client_id,
                 issuer=_ISSUER,
+                leeway=_CLOCK_SKEW_LEEWAY_SECONDS,
             )
         )
     except Exception as exc:  # pragma: no cover — network/crypto path

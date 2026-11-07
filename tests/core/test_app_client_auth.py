@@ -210,3 +210,25 @@ def test_assert_redirect_allowed_tolerates_trailing_slash_in_registration() -> N
     """An origin registered with a trailing slash still matches."""
     client = _client_with_origins("http://localhost:3000/")
     assert_redirect_allowed(client, "http://localhost:3000/auth/verify")
+
+
+def test_non_ascii_secret_yields_401_not_500(
+    client: FlaskClient, db_session: Session
+) -> None:
+    """A non-ASCII X-Client-Secret is a clean 401, never a 500.
+
+    The header value is attacker-controlled; an encoding crash would
+    both leak a client-id-exists oracle (the crash only fired after
+    the unknown-client check passed) and pollute error logs.
+    """
+    client_id = _register_client(db_session)
+
+    response = client.get(
+        "/protected",
+        headers={
+            "X-Client-Id": client_id,
+            "X-Client-Secret": "ñøt-the-secret-ü",
+        },
+    )
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "INVALID_CLIENT"

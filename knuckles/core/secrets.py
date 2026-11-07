@@ -29,7 +29,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from sqlalchemy import String, TypeDecorator
 
 from knuckles.core.config import get_settings
@@ -51,31 +51,38 @@ class SecretsKeyNotConfiguredError(RuntimeError):
 
 
 @lru_cache(maxsize=1)
-def get_fernet() -> Fernet:
-    """Return a process-singleton :class:`Fernet` for tenant secrets.
+def get_fernet() -> MultiFernet:
+    """Return the process-singleton cipher for tenant secrets.
 
-    Cached because Fernet construction validates the key on every
-    call, and the key is stable for the process lifetime. Use
+    ``KNUCKLES_SECRETS_KEY`` accepts a comma-separated, ordered list
+    of Fernet keys: the **first** key encrypts every new write, and
+    all keys are tried on decrypt. That makes rotation an env change
+    instead of a brick: append the new key first, redeploy, run
+    ``scripts/reencrypt_tenant_secrets.py``, then drop the old key.
+
+    Cached because key validation runs on every construction and the
+    list is stable for the process lifetime. Use
     ``get_fernet.cache_clear()`` in tests that intentionally swap the
     key.
 
     Returns:
-        A :class:`Fernet` instance built from the configured
-        ``KNUCKLES_SECRETS_KEY``.
+        A :class:`MultiFernet` built from the configured key list (a
+        single key yields a one-entry MultiFernet — same interface).
 
     Raises:
         SecretsKeyNotConfiguredError: If the env var is empty.
-        ValueError: If the key is set but is not a valid Fernet key
+        ValueError: If any key in the list is not a valid Fernet key
             (wrong length, wrong base64 alphabet).
     """
-    key = get_settings().knuckles_secrets_key
-    if not key:
+    raw = get_settings().knuckles_secrets_key
+    keys = [part.strip() for part in raw.split(",") if part.strip()]
+    if not keys:
         raise SecretsKeyNotConfiguredError(
             "KNUCKLES_SECRETS_KEY is not configured. "
             "Generate one with `cryptography.fernet.Fernet.generate_key()` "
             "and set it in the deployment environment."
         )
-    return Fernet(key.encode("ascii"))
+    return MultiFernet([Fernet(key.encode("ascii")) for key in keys])
 
 
 def encrypt(plaintext: str) -> str:

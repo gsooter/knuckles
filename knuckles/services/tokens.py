@@ -38,9 +38,12 @@ from knuckles.core.exceptions import (
     REFRESH_TOKEN_EXPIRED,
     REFRESH_TOKEN_INVALID,
     REFRESH_TOKEN_REUSED,
+    SESSION_NOT_FOUND,
     AppError,
+    NotFoundError,
 )
 from knuckles.core.jwt import issue_access_token
+from knuckles.data.models import RefreshToken
 from knuckles.data.repositories import auth as repo
 
 _audit = logging.getLogger("knuckles.audit")
@@ -175,10 +178,11 @@ def rotate_refresh_token(
         A fresh :class:`TokenPair`.
 
     Raises:
-        AppError: With code ``REFRESH_TOKEN_INVALID`` (unknown token),
-            ``REFRESH_TOKEN_REUSED`` (already consumed),
-            ``REFRESH_TOKEN_EXPIRED`` (past ``expires_at``), or
-            ``INVALID_CLIENT`` (token issued for a different app).
+        AppError: With code ``REFRESH_TOKEN_INVALID`` (unknown token or
+            deactivated user), ``REFRESH_TOKEN_REUSED`` (already
+            consumed, including a lost race against a concurrent
+            rotation), ``REFRESH_TOKEN_EXPIRED`` (past ``expires_at``),
+            or ``INVALID_CLIENT`` (token issued for a different app).
     """
     row = repo.get_refresh_token_by_hash(session, _hash_token(refresh_token))
     if row is None:
@@ -189,20 +193,7 @@ def rotate_refresh_token(
         )
 
     if row.used_at is not None:
-        revoked = repo.revoke_all_refresh_tokens_for_user(session, row.user_id)
-        _audit.warning(
-            "refresh_token_reused user_id=%s app_client_id=%s "
-            "tokens_revoked=%d — every session for this user has been "
-            "invalidated; user must re-authenticate.",
-            row.user_id,
-            app_client_id,
-            revoked,
-        )
-        raise AppError(
-            code=REFRESH_TOKEN_REUSED,
-            message="Refresh token has already been used.",
-            status_code=401,
-        )
+        _revoke_all_for_reuse(session, row.user_id, app_client_id)
 
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
@@ -221,14 +212,168 @@ def rotate_refresh_token(
             status_code=401,
         )
 
-    repo.mark_refresh_token_used(session, row)
+    user = repo.get_user_by_id(session, row.user_id)
+    if user is None or not user.is_active:
+        raise AppError(
+            code=REFRESH_TOKEN_INVALID,
+            message="Refresh token is invalid.",
+            status_code=401,
+        )
+
+    # The conditional consume is the single-use guarantee: under a
+    # concurrent rotation of the same token, exactly one request wins.
+    # The loser is indistinguishable from a replayed stolen token, so
+    # it gets the full reuse response.
+    if not repo.consume_refresh_token(session, row):
+        _revoke_all_for_reuse(session, row.user_id, app_client_id)
 
     return issue_session(
         session,
         user_id=row.user_id,
         app_client_id=app_client_id,
         scopes=scopes,
-        email=email,
+        email=email if email is not None else user.email,
+    )
+
+
+def _revoke_all_for_reuse(
+    session: Session,
+    user_id: uuid.UUID,
+    app_client_id: str,
+) -> None:
+    """Apply the reuse-detection response and raise.
+
+    Revokes every active refresh token for the user (across all app
+    clients — a reuse event is a compromise signal, so the blast
+    radius is deliberately global per Decision #008) and raises
+    ``REFRESH_TOKEN_REUSED``.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user whose tokens are revoked.
+        app_client_id: Calling client, for the audit log line.
+
+    Raises:
+        AppError: Always, with code ``REFRESH_TOKEN_REUSED``.
+    """
+    revoked = repo.revoke_all_refresh_tokens_for_user(session, user_id)
+    _audit.warning(
+        "refresh_token_reused user_id=%s app_client_id=%s "
+        "tokens_revoked=%d — every session for this user has been "
+        "invalidated; user must re-authenticate.",
+        user_id,
+        app_client_id,
+        revoked,
+    )
+    raise AppError(
+        code=REFRESH_TOKEN_REUSED,
+        message="Refresh token has already been used.",
+        status_code=401,
+    )
+
+
+def revoke_all_sessions(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+) -> int:
+    """Revoke every active refresh token a user holds with one app.
+
+    Backs the user-initiated "sign out of all devices" endpoint. The
+    revocation is scoped to the calling app client — a shared identity
+    signed in to two consuming apps keeps its other app's sessions.
+    The cross-tenant blanket revoke is reserved for the
+    reuse-detection security response.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user signing out.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+
+    Returns:
+        Number of refresh tokens revoked.
+    """
+    revoked = repo.revoke_all_refresh_tokens_for_user(
+        session, user_id, app_client_id=app_client_id
+    )
+    _audit.info(
+        "logout_all user_id=%s app_client_id=%s tokens_revoked=%d",
+        user_id,
+        app_client_id,
+        revoked,
+    )
+    return revoked
+
+
+def list_sessions(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+) -> list[RefreshToken]:
+    """List a user's active sessions (refresh tokens) with one app.
+
+    Backs ``GET /v1/sessions``. The view is scoped to the calling app
+    client and is strictly point-in-time: rotation replaces refresh
+    rows, so every ``/v1/token/refresh`` retires one id and mints a
+    new one. Consumers must not treat the ids as stable handles.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the signed-in user.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+
+    Returns:
+        Active ``RefreshToken`` rows (``used_at IS NULL`` and not yet
+        expired), ordered by creation time.
+    """
+    return repo.list_active_refresh_tokens_for_user(
+        session,
+        user_id,
+        app_client_id=app_client_id,
+        now=datetime.now(tz=UTC),
+    )
+
+
+def revoke_session(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+    session_id: uuid.UUID,
+) -> None:
+    """Revoke one of the user's sessions by refresh-token row id.
+
+    Backs ``DELETE /v1/sessions/<id>``. The repository enforces the
+    ``(user_id, app_client_id)`` ownership scope, so a guessed or
+    captured id belonging to another user or tenant is
+    indistinguishable from an unknown one.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the signed-in user.
+        app_client_id: ``app_clients.client_id`` of the calling app.
+        session_id: ``refresh_tokens.id`` of the session to revoke.
+
+    Raises:
+        NotFoundError: With code ``SESSION_NOT_FOUND`` when no active
+            session with that id is owned by this user and client —
+            including ids that are already consumed or expired.
+    """
+    revoked = repo.revoke_refresh_token_by_id(
+        session,
+        user_id=user_id,
+        app_client_id=app_client_id,
+        token_id=session_id,
+    )
+    if not revoked:
+        raise NotFoundError(code=SESSION_NOT_FOUND, message="Session not found.")
+    _audit.info(
+        "session_revoked user_id=%s app_client_id=%s session_id=%s",
+        user_id,
+        app_client_id,
+        session_id,
     )
 
 

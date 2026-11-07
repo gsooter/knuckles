@@ -1,6 +1,6 @@
 {
   "name": "@knuckles/client",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for the Knuckles identity service",
   "keywords": [
     "authentication",

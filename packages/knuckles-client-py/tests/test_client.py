@@ -12,6 +12,7 @@ suite is hermetic. Coverage focuses on:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -24,7 +25,7 @@ from knuckles_client import (
     KnucklesValidationError,
 )
 
-from .conftest import BASE_URL, CLIENT_ID, CLIENT_SECRET
+from .conftest import ADMIN_TOKEN, BASE_URL, CLIENT_ID, CLIENT_SECRET
 
 
 def _token_pair_body() -> dict[str, object]:
@@ -53,6 +54,22 @@ def _assert_client_headers(call: responses.Call) -> None:
     """
     assert call.request.headers["X-Client-Id"] == CLIENT_ID
     assert call.request.headers["X-Client-Secret"] == CLIENT_SECRET
+
+
+def _request_json(call: responses.Call) -> dict[str, object]:
+    """Decode a captured request's JSON body.
+
+    Args:
+        call: The captured request from ``responses.calls``.
+
+    Returns:
+        The parsed JSON body as a dict.
+    """
+    body = call.request.body
+    assert body is not None
+    parsed = json.loads(body)
+    assert isinstance(parsed, dict)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +114,50 @@ def test_magic_link_start_429_raises_rate_limit_error(
     with pytest.raises(KnucklesRateLimitError) as exc_info:
         client.magic_link.start(email="x@y", redirect_url="https://app/cb")
     assert exc_info.value.code == "RATE_LIMITED"
+
+
+def test_rate_limit_error_parses_retry_after_header(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """A 429 with ``Retry-After: <seconds>`` populates ``retry_after``."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=429,
+        json={"error": {"code": "RATE_LIMITED", "message": "slow down"}},
+        headers={"Retry-After": "30"},
+    )
+    with pytest.raises(KnucklesRateLimitError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="https://app/cb")
+    assert exc_info.value.retry_after == 30
+
+
+def test_rate_limit_error_retry_after_none_when_header_absent(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """A 429 without ``Retry-After`` leaves ``retry_after`` as ``None``."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=429,
+        json={"error": {"code": "RATE_LIMITED", "message": "slow down"}},
+    )
+    with pytest.raises(KnucklesRateLimitError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="https://app/cb")
+    assert exc_info.value.retry_after is None
+
+
+def test_rate_limit_error_retry_after_none_for_http_date(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """The HTTP-date ``Retry-After`` form is not parsed — ``None``."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/auth/magic-link/start",
+        status=429,
+        json={"error": {"code": "RATE_LIMITED", "message": "slow down"}},
+        headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"},
+    )
+    with pytest.raises(KnucklesRateLimitError) as exc_info:
+        client.magic_link.start(email="x@y", redirect_url="https://app/cb")
+    assert exc_info.value.retry_after is None
 
 
 def test_magic_link_start_422_raises_validation_error(
@@ -399,3 +460,320 @@ def test_fetch_openid_configuration_parses_body(
     )
     body = client.fetch_openid_configuration()
     assert body["issuer"] == BASE_URL
+
+
+# ---------------------------------------------------------------------------
+# Account management (client.me.*)
+# ---------------------------------------------------------------------------
+
+
+def test_update_profile_sends_only_provided_fields(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.update_profile`` PATCHes only the field that was passed."""
+    mocked_responses.patch(
+        f"{BASE_URL}/v1/me",
+        status=200,
+        json={"data": {"id": "u-1", "display_name": "New Name"}},
+    )
+    out = client.me.update_profile(access_token="bearer", display_name="New Name")
+    assert out["display_name"] == "New Name"
+    call = mocked_responses.calls[0]
+    assert call.request.headers["Authorization"] == "Bearer bearer"
+    assert _request_json(call) == {"display_name": "New Name"}
+
+
+def test_update_profile_explicit_none_clears_field(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """An explicit ``None`` is sent in the body (clears server-side)."""
+    mocked_responses.patch(
+        f"{BASE_URL}/v1/me",
+        status=200,
+        json={"data": {"id": "u-1", "avatar_url": None}},
+    )
+    client.me.update_profile(access_token="bearer", avatar_url=None)
+    assert _request_json(mocked_responses.calls[0]) == {"avatar_url": None}
+
+
+def test_me_call_still_returns_user_profile(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``client.me(access_token=...)`` keeps its pre-0.1.2 behavior."""
+    mocked_responses.get(
+        f"{BASE_URL}/v1/me",
+        status=200,
+        json={
+            "data": {
+                "id": "u-1",
+                "email": "me@example.com",
+                "display_name": "Me",
+                "avatar_url": None,
+                "app_client_id": CLIENT_ID,
+            }
+        },
+    )
+    profile = client.me(access_token="bearer")
+    assert profile.id == "u-1"
+    assert profile.app_client_id == CLIENT_ID
+
+
+def test_delete_account_handles_204(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.delete_account`` DELETEs /v1/me and accepts a 204."""
+    mocked_responses.delete(f"{BASE_URL}/v1/me", status=204)
+    client.me.delete_account(access_token="bearer")
+    auth = mocked_responses.calls[0].request.headers["Authorization"]
+    assert auth == "Bearer bearer"
+
+
+def test_list_providers_returns_rows(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.list_providers`` returns the provider rows from ``data``."""
+    mocked_responses.get(
+        f"{BASE_URL}/v1/me/providers",
+        status=200,
+        json={
+            "data": [
+                {
+                    "provider": "google",
+                    "created_at": "2026-04-26T12:00:00+00:00",
+                    "scopes": "openid email profile",
+                }
+            ]
+        },
+    )
+    rows = client.me.list_providers(access_token="bearer")
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "google"
+
+
+def test_unlink_provider_handles_204(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.unlink_provider`` DELETEs the provider-specific path."""
+    mocked_responses.delete(f"{BASE_URL}/v1/me/providers/google", status=204)
+    client.me.unlink_provider(access_token="bearer", provider="google")
+    auth = mocked_responses.calls[0].request.headers["Authorization"]
+    assert auth == "Bearer bearer"
+
+
+def test_start_email_change_posts_body_and_bearer(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.start_email_change`` POSTs the new address + redirect URL."""
+    mocked_responses.post(f"{BASE_URL}/v1/me/email/start", status=202)
+    client.me.start_email_change(
+        access_token="bearer",
+        new_email="new@example.com",
+        redirect_url="https://app/email/verify",
+    )
+    call = mocked_responses.calls[0]
+    assert call.request.headers["Authorization"] == "Bearer bearer"
+    assert _request_json(call) == {
+        "new_email": "new@example.com",
+        "redirect_url": "https://app/email/verify",
+    }
+
+
+def test_verify_email_change_returns_email_with_client_headers_only(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``me.verify_email_change`` is client-headers-only and returns data."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/me/email/verify",
+        status=200,
+        json={"data": {"email": "new@example.com"}},
+    )
+    out = client.me.verify_email_change("raw-token")
+    assert out == {"email": "new@example.com"}
+    call = mocked_responses.calls[0]
+    _assert_client_headers(call)
+    assert "Authorization" not in call.request.headers
+    assert _request_json(call) == {"token": "raw-token"}
+
+
+# ---------------------------------------------------------------------------
+# Sessions
+# ---------------------------------------------------------------------------
+
+
+def test_sessions_list_returns_rows(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``sessions.list`` returns the session rows from ``data``."""
+    mocked_responses.get(
+        f"{BASE_URL}/v1/sessions",
+        status=200,
+        json={
+            "data": [
+                {
+                    "id": "sess-1",
+                    "created_at": "2026-06-01T12:00:00+00:00",
+                    "expires_at": "2026-07-01T12:00:00+00:00",
+                }
+            ]
+        },
+    )
+    rows = client.sessions.list(access_token="bearer")
+    assert len(rows) == 1
+    assert rows[0]["id"] == "sess-1"
+    auth = mocked_responses.calls[0].request.headers["Authorization"]
+    assert auth == "Bearer bearer"
+
+
+def test_sessions_revoke_handles_204(
+    client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``sessions.revoke`` DELETEs the session-specific path."""
+    mocked_responses.delete(f"{BASE_URL}/v1/sessions/sess-1", status=204)
+    client.sessions.revoke(access_token="bearer", session_id="sess-1")
+    auth = mocked_responses.calls[0].request.headers["Authorization"]
+    assert auth == "Bearer bearer"
+
+
+# ---------------------------------------------------------------------------
+# Admin
+# ---------------------------------------------------------------------------
+
+
+def _assert_admin_headers(call: responses.Call) -> None:
+    """Assert admin auth: ``X-Admin-Token`` on, client headers off.
+
+    Args:
+        call: The captured request from ``responses.calls``.
+    """
+    assert call.request.headers["X-Admin-Token"] == ADMIN_TOKEN
+    assert "X-Client-Id" not in call.request.headers
+    assert "X-Client-Secret" not in call.request.headers
+
+
+def test_admin_methods_require_admin_token(client: KnucklesClient) -> None:
+    """Calling any admin method without ``admin_token`` raises clearly."""
+    with pytest.raises(RuntimeError, match="admin_token"):
+        client.admin.list_app_clients()
+
+
+def test_admin_create_app_client_sends_admin_header_and_body(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.create_app_client`` POSTs with X-Admin-Token only."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/admin/app-clients",
+        status=201,
+        json={
+            "data": {
+                "client_id": "new-app",
+                "app_name": "New App",
+                "client_secret": "one-time-secret",
+            }
+        },
+    )
+    out = admin_client.admin.create_app_client(
+        client_id="new-app",
+        app_name="New App",
+        allowed_origins=["https://new-app.example.com"],
+    )
+    assert out["client_secret"] == "one-time-secret"
+    call = mocked_responses.calls[0]
+    _assert_admin_headers(call)
+    assert _request_json(call) == {
+        "client_id": "new-app",
+        "app_name": "New App",
+        "allowed_origins": ["https://new-app.example.com"],
+    }
+
+
+def test_admin_create_app_client_omits_origins_when_not_passed(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``allowed_origins`` is left out of the body when not supplied."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/admin/app-clients",
+        status=201,
+        json={"data": {"client_id": "new-app", "client_secret": "s"}},
+    )
+    admin_client.admin.create_app_client(client_id="new-app", app_name="New App")
+    assert _request_json(mocked_responses.calls[0]) == {
+        "client_id": "new-app",
+        "app_name": "New App",
+    }
+
+
+def test_admin_list_app_clients_returns_rows(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.list_app_clients`` returns the rows from ``data``."""
+    mocked_responses.get(
+        f"{BASE_URL}/v1/admin/app-clients",
+        status=200,
+        json={"data": [{"client_id": "my-app", "app_name": "My App"}]},
+    )
+    rows = admin_client.admin.list_app_clients()
+    assert rows[0]["client_id"] == "my-app"
+    _assert_admin_headers(mocked_responses.calls[0])
+
+
+def test_admin_get_app_client_hits_id_path(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.get_app_client`` GETs the id-specific path."""
+    mocked_responses.get(
+        f"{BASE_URL}/v1/admin/app-clients/my-app",
+        status=200,
+        json={"data": {"client_id": "my-app", "app_name": "My App"}},
+    )
+    out = admin_client.admin.get_app_client("my-app")
+    assert out["app_name"] == "My App"
+    _assert_admin_headers(mocked_responses.calls[0])
+
+
+def test_admin_update_app_client_passes_fields_through(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.update_app_client`` PATCHes the kwargs verbatim."""
+    mocked_responses.patch(
+        f"{BASE_URL}/v1/admin/app-clients/my-app",
+        status=200,
+        json={"data": {"client_id": "my-app", "app_name": "Renamed"}},
+    )
+    out = admin_client.admin.update_app_client(
+        "my-app", app_name="Renamed", resend_from_email="auth@my-app.com"
+    )
+    assert out["app_name"] == "Renamed"
+    assert _request_json(mocked_responses.calls[0]) == {
+        "app_name": "Renamed",
+        "resend_from_email": "auth@my-app.com",
+    }
+
+
+def test_admin_rotate_secret_returns_new_secret(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.rotate_secret`` POSTs the rotate path, returns the secret."""
+    mocked_responses.post(
+        f"{BASE_URL}/v1/admin/app-clients/my-app/rotate-secret",
+        status=200,
+        json={"data": {"client_id": "my-app", "client_secret": "rotated"}},
+    )
+    out = admin_client.admin.rotate_secret("my-app")
+    assert out["client_secret"] == "rotated"
+    _assert_admin_headers(mocked_responses.calls[0])
+
+
+def test_admin_set_origins_puts_full_list(
+    admin_client: KnucklesClient, mocked_responses: responses.RequestsMock
+) -> None:
+    """``admin.set_origins`` PUTs the complete origins list."""
+    mocked_responses.put(
+        f"{BASE_URL}/v1/admin/app-clients/my-app/origins",
+        status=200,
+        json={"data": {"client_id": "my-app", "allowed_origins": ["https://a"]}},
+    )
+    out = admin_client.admin.set_origins("my-app", ["https://a"])
+    assert out["allowed_origins"] == ["https://a"]
+    call = mocked_responses.calls[0]
+    _assert_admin_headers(call)
+    assert _request_json(call) == {"allowed_origins": ["https://a"]}

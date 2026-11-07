@@ -16,6 +16,7 @@ same so callers don't change.
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -76,6 +77,31 @@ class RateLimiter:
                 return False
             events.append(now)
             return True
+
+    def seconds_until_allowed(self, key: str) -> int:
+        """Report how long until ``key`` has budget again.
+
+        Backs the ``Retry-After`` header on 429 responses.
+
+        Args:
+            key: Bucket key previously rejected by :meth:`allow`.
+
+        Returns:
+            Whole seconds (rounded up) until the oldest in-window
+            event expires and frees a slot — ``0`` when the key
+            already has budget.
+        """
+        now = self._clock()
+        cutoff = now - self._window
+        with self._lock:
+            events = self._events.get(key)
+            if events is None:
+                return 0
+            while events and events[0] < cutoff:
+                events.popleft()
+            if len(events) < self._max:
+                return 0
+            return max(1, math.ceil(events[0] - cutoff))
 
     def reset(self) -> None:
         """Drop all recorded events.

@@ -30,6 +30,7 @@ from .exceptions import (
     KnucklesNetworkError,
     KnucklesRateLimitError,
     KnucklesTokenError,
+    KnucklesTokenExpiredError,
     KnucklesValidationError,
 )
 from .models import (
@@ -40,7 +41,7 @@ from .models import (
     UserProfile,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "CeremonyStart",
@@ -51,6 +52,7 @@ __all__ = [
     "KnucklesNetworkError",
     "KnucklesRateLimitError",
     "KnucklesTokenError",
+    "KnucklesTokenExpiredError",
     "KnucklesValidationError",
     "PasskeyChallenge",
     "PasskeyDescriptor",

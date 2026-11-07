@@ -167,3 +167,70 @@ def test_jwks_key_validates_issued_token() -> None:
         issuer="http://localhost:5001",
     )
     assert claims["aud"] == "greenroom"
+
+
+class TestKeyRotationOverlap:
+    """Retired keys stay published and verifiable during rotation."""
+
+    @staticmethod
+    def _generate_keypair_b64() -> tuple[str, object]:
+        """Generate a throwaway RSA key for the retired slot.
+
+        Returns:
+            Tuple of (base64-encoded PEM, private key object).
+        """
+        import base64
+
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        return base64.b64encode(pem).decode("ascii"), key
+
+    def test_jwks_publishes_retired_keys_during_overlap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """KNUCKLES_JWT_RETIRED_KEYS adds entries to the JWKS."""
+        retired_b64, _ = self._generate_keypair_b64()
+        monkeypatch.setenv("KNUCKLES_JWT_RETIRED_KEYS", f"old-key-1:{retired_b64}")
+
+        jwks = get_jwks()
+        kids = [entry["kid"] for entry in jwks["keys"]]
+        assert kids == ["test-key-1", "old-key-1"]
+
+    def test_token_signed_under_retired_key_still_verifies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Outstanding tokens survive the rotation window.
+
+        A token minted under the previous kid must verify until it
+        expires, so rotation never forces a mass sign-out.
+        """
+        import time
+
+        import jwt as pyjwt
+
+        retired_b64, retired_key = self._generate_keypair_b64()
+        monkeypatch.setenv("KNUCKLES_JWT_RETIRED_KEYS", f"old-key-1:{retired_b64}")
+
+        now = int(time.time())
+        legacy_token = pyjwt.encode(
+            {
+                "iss": "http://localhost:5001",
+                "sub": "0" * 32,
+                "aud": "greenroom-prod",
+                "iat": now,
+                "exp": now + 600,
+            },
+            retired_key,
+            algorithm="RS256",
+            headers={"kid": "old-key-1"},
+        )
+
+        claims = verify_access_token(legacy_token)
+        assert claims["aud"] == "greenroom-prod"

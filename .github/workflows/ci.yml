@@ -74,6 +74,39 @@ jobs:
       - name: Pytest
         run: pytest
 
+  cli:
+    name: Operator CLI (knuckles-cli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/knuckles-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Black (format check)
+        run: black --check src tests
+
+      - name: Ruff (lint)
+        run: ruff check .
+
+      - name: Mypy (strict)
+        run: mypy src
+
+      - name: Pytest (with 80% coverage gate)
+        run: pytest --cov=knuckles_cli --cov-report=term-missing --cov-fail-under=80
+
   sdk-typescript:
     name: TypeScript SDK (@knuckles/client)
     runs-on: ubuntu-latest

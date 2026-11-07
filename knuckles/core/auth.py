@@ -1,14 +1,15 @@
 """Bearer-token auth decorator for Knuckles' own endpoints.
 
 Knuckles issues access tokens; it also *consumes* them on its own first-
-party endpoints (``/v1/me``, passkey registration, ``/v1/logout/all``).
+party endpoints (``/v1/me``, passkey registration, session management).
 This module is the verifier for those calls.
 
-Every Knuckles access token carries ``aud = app_client_id``. When the
-consuming app calls Knuckles with that token, Knuckles accepts any
-``aud`` that resolves to a registered ``app_clients.client_id``. The
-specific audience is surfaced via ``get_token_claims`` so route handlers
-that care (e.g. scope checks) can consult it.
+Every Knuckles access token carries ``aud = app_client_id``. Routes
+that authenticate the calling app *and* the user (client headers plus
+bearer) must additionally call :func:`assert_token_audience` so a
+token minted for tenant A can never be exercised through tenant B's
+client credentials. Bearer-only routes read the tenant context from
+the verified ``aud`` claim via :func:`get_current_app_client_id`.
 """
 
 from __future__ import annotations
@@ -102,6 +103,31 @@ def get_token_claims() -> dict[str, object]:
             "get_token_claims called outside a require_auth-decorated view."
         )
     return cast("dict[str, object]", claims)
+
+
+def assert_token_audience(app_client_id: str) -> None:
+    """Require the current token's ``aud`` to match the calling client.
+
+    Dual-auth routes (client headers + bearer) must pin the token to
+    the caller: without this check any registered tenant could replay
+    a leaked access token minted for another tenant (confused deputy).
+
+    Args:
+        app_client_id: ``app_clients.client_id`` of the authenticated
+            caller (from the ``X-Client-Id`` header).
+
+    Raises:
+        UnauthorizedError: With code ``INVALID_TOKEN`` when the token
+            was minted for a different app client.
+        RuntimeError: If called outside a ``require_auth``-decorated
+            view.
+    """
+    aud = get_token_claims().get("aud")
+    if aud != app_client_id:
+        raise UnauthorizedError(
+            message="Access token was not issued for this client.",
+            code=INVALID_TOKEN,
+        )
 
 
 def get_current_app_client_id() -> str:

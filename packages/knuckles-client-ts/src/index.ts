@@ -6,8 +6,16 @@
  * type method parameters / inject their own subclasses if they want.
  */
 
-export { KnucklesClient, MagicLinkClient, OAuthClient, PasskeyClient } from './client.js'
-export type { KnucklesClientOptions } from './client.js'
+export {
+  AdminClient,
+  KnucklesClient,
+  MagicLinkClient,
+  OAuthClient,
+  PasskeyClient,
+  SessionsClient,
+  VERSION,
+} from './client.js'
+export type { KnucklesClientOptions, MeClient } from './client.js'
 export {
   KnucklesAPIError,
   KnucklesAuthError,
@@ -15,6 +23,7 @@ export {
   KnucklesNetworkError,
   KnucklesRateLimitError,
   KnucklesTokenError,
+  KnucklesTokenExpiredError,
   KnucklesValidationError,
 } from './errors.js'
 export type {
@@ -25,11 +34,3 @@ export type {
   TokenPair,
   UserProfile,
 } from './types.js'
-
-/**
- * Hardcoded SDK version. Kept in sync with `package.json` by hand on every
- * release — see `PUBLISHING.md`. Importing JSON at runtime would force every
- * consumer's bundler to ship `package.json`, which is awkward in some
- * setups, so we mirror the constant here instead.
- */
-export const VERSION = '0.1.0'

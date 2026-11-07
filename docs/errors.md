@@ -116,7 +116,7 @@ fall through to a generic "auth failed" handler — don't crash.
 | `REFRESH_TOKEN_INVALID` | 401 | The refresh token doesn't match any row in `refresh_tokens`. | Re-authenticate the user. |
 | `REFRESH_TOKEN_EXPIRED` | 401 | The refresh token's 30-day window has elapsed. | Re-authenticate the user. |
 | `REFRESH_TOKEN_REUSED` | 401 | A refresh token was presented twice. **Knuckles has revoked every refresh token for this user as a security response.** | Sign the user out everywhere they had sessions; show "you've been signed out for security." |
-| `INVALID_GRANT` | 400 | The refresh token is structurally valid but was issued for a different `app_client_id`. | Verify the token was issued to your app. |
+| `INVALID_CLIENT` | 401 | Also returned when a refresh token is structurally valid but was issued for a different `app_client_id`. | Verify the token was issued to your app. |
 
 ### Magic-link
 
@@ -127,6 +127,15 @@ fall through to a generic "auth failed" handler — don't crash.
 | `MAGIC_LINK_ALREADY_USED` | 400 | The token already redeemed a session. | Same — request a fresh link. |
 | `EMAIL_DELIVERY_FAILED` | 502 | Resend rejected the send (unverified domain, malformed `from`, suspended account, etc.). | The error message contains Resend's reason. Most often: domain not verified in Resend, or `RESEND_FROM_EMAIL` doesn't match a verified domain. |
 | `RATE_LIMITED` | 429 | Per-email magic-link rate limit hit (default 5/hour/email). | Surface a friendly "try again in a few minutes" message; do not retry automatically. |
+
+### Tenant configuration
+
+Not magic-link-specific — any ceremony (magic-link, Google, Apple,
+passkey) can hit this when its config group is incomplete.
+
+| Code | HTTP | When you see it | What to do |
+|---|---|---|---|
+| `TENANT_CONFIG_INCOMPLETE` | 500 | The app client's per-tenant config group (Google/Apple/WebAuthn/Resend) is partially configured, or the env fallback is disabled and a group is missing. | Operator action: populate the columns via `scripts/configure_app_client.py`. |
 
 ### OAuth (Google + Apple)
 
@@ -157,6 +166,18 @@ where one is available.
 | Code | HTTP | When you see it | What to do |
 |---|---|---|---|
 | `USER_NOT_FOUND` | 404 | A user-scoped operation referenced an id that doesn't exist (or was deleted). | Treat as deleted/unknown. Don't retry. |
+
+### Self-service (`/v1/me/*`, `/v1/sessions/*`)
+
+| Code | HTTP | When you see it | What to do |
+|---|---|---|---|
+| `SESSION_NOT_FOUND` | 404 | `DELETE /v1/sessions/<id>` with an id that's malformed, unknown, owned by another user or app client, or already consumed/expired. | Refresh your session list (`GET /v1/sessions`) — rotation replaces ids on every refresh, so a stale id is expected, not an error to retry. |
+| `PROVIDER_NOT_FOUND` | 404 | `DELETE /v1/me/providers/<provider>` with an unknown provider name or no such link on the account. | Re-fetch `GET /v1/me/providers` and reconcile your UI. Don't retry. |
+| `EMAIL_IN_USE` | 409 | `POST /v1/me/email/verify` — the new address was claimed by another account between the start and verify steps. | Tell the user the address is taken; let them start over with a different one. |
+
+`POST /v1/me/email/start` shares the magic-link rate-limit contract:
+the same per-address budget, the same `RATE_LIMITED` 429, and the same
+`Retry-After` header. Handle it exactly like a magic-link 429.
 
 ### Server / fallthrough
 
@@ -225,6 +246,12 @@ Error envelope shape and code stability are versioned with the SDK:
 - **`knuckles-client` 0.1.1** — `meta.request_id` always present;
   `KnucklesAPIError.request_id` exposed; matching server-side log
   correlation via `X-Request-Id` request and response headers.
+- **`knuckles-client` 0.1.2 / `@knuckles/client` 0.1.1** —
+  `KnucklesTokenExpiredError` (a `KnucklesTokenError` subclass, so
+  existing handlers still catch it) lets you distinguish "expired,
+  just refresh" from "actually invalid";
+  `KnucklesRateLimitError.retry_after` (`retryAfter` in TS) carries
+  the parsed `Retry-After` seconds.
 
 Both versions interop with both server versions. Upgrading the SDK
 unlocks request-id correlation against a server that supports it

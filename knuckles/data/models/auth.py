@@ -186,6 +186,17 @@ class MagicLinkToken(TimestampMixin, Base):
         used_at: Timestamp the link was redeemed. ``None`` means
             still redeemable within the expiry window.
         user_id: Set once the link is redeemed.
+        app_client_id: The app client the link was issued through
+            (Decision #019). Verification rejects redemption through
+            any other client. ``None`` only on rows minted before
+            tenant scoping landed.
+        purpose: Ceremony the token belongs to — ``"sign_in"``
+            (default) or ``"email_change"``. Verification requires an
+            exact match so a token minted for one ceremony can never
+            be redeemed through another. Stored as a plain string
+            rather than a native PG enum (see migration
+            ``20260612_ml_purpose``) so adding a purpose never needs
+            an enum migration.
     """
 
     __tablename__ = "magic_link_tokens"
@@ -200,7 +211,7 @@ class MagicLinkToken(TimestampMixin, Base):
         String(128), nullable=False, unique=True, index=True
     )
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -210,6 +221,18 @@ class MagicLinkToken(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=True,
         index=True,
+    )
+    app_client_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("app_clients.client_id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    purpose: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="sign_in",
+        server_default="sign_in",
     )
 
     def __repr__(self) -> str:
@@ -418,7 +441,7 @@ class RefreshToken(TimestampMixin, Base):
         String(128), nullable=False, unique=True, index=True
     )
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

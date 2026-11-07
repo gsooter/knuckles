@@ -12,6 +12,7 @@ from knuckles_client import KnucklesClient
 BASE_URL = "https://auth.example.com"
 CLIENT_ID = "my-app"
 CLIENT_SECRET = "secret"
+ADMIN_TOKEN = "admin-secret"
 
 
 @pytest.fixture()
@@ -34,4 +35,19 @@ def client() -> KnucklesClient:
     """
     return KnucklesClient(
         base_url=BASE_URL, client_id=CLIENT_ID, client_secret=CLIENT_SECRET
+    )
+
+
+@pytest.fixture()
+def admin_client() -> KnucklesClient:
+    """Return an SDK client with the admin API configured.
+
+    Returns:
+        A :class:`KnucklesClient` constructed with ``admin_token``.
+    """
+    return KnucklesClient(
+        base_url=BASE_URL,
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        admin_token=ADMIN_TOKEN,
     )

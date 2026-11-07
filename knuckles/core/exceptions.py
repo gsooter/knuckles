@@ -13,6 +13,8 @@ class AppError(Exception):
         code: Machine-readable error code string.
         message: Human-readable error description.
         status_code: HTTP status code for the error response.
+        headers: Optional extra HTTP headers the error handler should
+            attach to the response (e.g. ``Retry-After`` on a 429).
     """
 
     def __init__(
@@ -20,6 +22,7 @@ class AppError(Exception):
         code: str,
         message: str,
         status_code: int = 400,
+        headers: dict[str, str] | None = None,
     ) -> None:
         """Initialize an ``AppError``.
 
@@ -27,11 +30,13 @@ class AppError(Exception):
             code: Machine-readable error code string.
             message: Human-readable error description.
             status_code: HTTP status code. Defaults to 400.
+            headers: Optional extra response headers.
         """
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
+        self.headers = headers or {}
 
 
 class NotFoundError(AppError):
@@ -92,7 +97,6 @@ INVALID_TOKEN = "INVALID_TOKEN"
 TOKEN_EXPIRED = "TOKEN_EXPIRED"
 INVALID_CLIENT = "INVALID_CLIENT"
 INVALID_SCOPE = "INVALID_SCOPE"
-INVALID_GRANT = "INVALID_GRANT"
 USER_NOT_FOUND = "USER_NOT_FOUND"
 MAGIC_LINK_INVALID = "MAGIC_LINK_INVALID"
 MAGIC_LINK_EXPIRED = "MAGIC_LINK_EXPIRED"
@@ -106,3 +110,9 @@ REFRESH_TOKEN_INVALID = "REFRESH_TOKEN_INVALID"
 REFRESH_TOKEN_EXPIRED = "REFRESH_TOKEN_EXPIRED"
 REFRESH_TOKEN_REUSED = "REFRESH_TOKEN_REUSED"
 RATE_LIMITED = "RATE_LIMITED"
+TENANT_CONFIG_INCOMPLETE = "TENANT_CONFIG_INCOMPLETE"
+SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+PROVIDER_NOT_FOUND = "PROVIDER_NOT_FOUND"
+EMAIL_IN_USE = "EMAIL_IN_USE"
+NOT_FOUND = "NOT_FOUND"
+APP_CLIENT_NOT_FOUND = "APP_CLIENT_NOT_FOUND"

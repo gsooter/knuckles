@@ -77,21 +77,23 @@ def start_magic_link_route() -> tuple[Response, int]:
     # app-client so two apps' send budgets don't collide.
     bucket_key = f"{app_client.client_id}:{email.lower()}"
     if not magic_link_limiter.allow(bucket_key):
+        retry_after = magic_link_limiter.seconds_until_allowed(bucket_key)
         raise AppError(
             code=RATE_LIMITED,
             message="Too many magic-link requests for this email. Try again later.",
             status_code=429,
+            headers={"Retry-After": str(retry_after)},
         )
 
     session = database.get_db()
+    # No sender is injected here: the service resolves the tenant's
+    # own Resend credentials from the app_clients row (Decision #017),
+    # falling back to the operator env vars when the columns are NULL.
     magic_link.start_magic_link(
         session,
         email=email,
         app_client_id=app_client.client_id,
         redirect_url=redirect_url,
-        # No sender here: the service builds one from the tenant's
-        # resend_* columns (Decision #017). Passing the operator default
-        # made every tenant's From address silently ignored.
     )
     return jsonify({}), 202
 

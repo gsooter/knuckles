@@ -202,3 +202,88 @@ def test_revoke_refresh_token_silent_on_unknown(db_session: Session) -> None:
         refresh_token="unknown",
         app_client_id=client_id,
     )
+
+
+def test_rotate_refresh_token_embeds_email_claim(db_session: Session) -> None:
+    """The rotated access token carries the user's email claim.
+
+    Ceremony-minted tokens always embed ``email``; refreshed tokens
+    must not silently drop it — consuming apps rely on the claim when
+    lazily provisioning their own user rows.
+    """
+    from knuckles.core.jwt import verify_access_token
+
+    user_id, client_id = _setup_user_and_client(db_session)
+    pair = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+
+    rotated = tokens.rotate_refresh_token(
+        db_session,
+        refresh_token=pair.refresh_token,
+        app_client_id=client_id,
+    )
+
+    claims = verify_access_token(rotated.access_token)
+    assert claims["email"] == "user@example.com"
+
+
+def test_rotate_refresh_token_rejects_inactive_user(db_session: Session) -> None:
+    """A deactivated user's refresh token cannot mint a new session."""
+    user_id, client_id = _setup_user_and_client(db_session)
+    pair = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+
+    user = repo.get_user_by_email(db_session, "user@example.com")
+    assert user is not None
+    user.is_active = False
+    db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        tokens.rotate_refresh_token(
+            db_session,
+            refresh_token=pair.refresh_token,
+            app_client_id=client_id,
+        )
+    assert exc.value.code == REFRESH_TOKEN_INVALID
+    assert exc.value.status_code == 401
+
+
+def test_rotate_refresh_token_lost_race_is_treated_as_reuse(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Losing the atomic consume race triggers the reuse response.
+
+    Simulates two concurrent rotations of the same token: this caller
+    read ``used_at IS NULL`` but the conditional consume found the row
+    already taken. The losing request must revoke every active token
+    and raise ``REFRESH_TOKEN_REUSED`` — never issue a second pair.
+    """
+    user_id, client_id = _setup_user_and_client(db_session)
+    pair = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+
+    monkeypatch.setattr(
+        tokens.repo, "consume_refresh_token", lambda session, token: False
+    )
+
+    with pytest.raises(AppError) as exc:
+        tokens.rotate_refresh_token(
+            db_session,
+            refresh_token=pair.refresh_token,
+            app_client_id=client_id,
+        )
+    assert exc.value.code == REFRESH_TOKEN_REUSED
+
+    active = [
+        row for row in db_session.query(RefreshToken).all() if row.used_at is None
+    ]
+    assert active == []
+
+
+def test_consume_refresh_token_is_single_winner(db_session: Session) -> None:
+    """The conditional consume admits exactly one winner per token."""
+    user_id, client_id = _setup_user_and_client(db_session)
+    pair = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+    token_hash = hashlib.sha256(pair.refresh_token.encode("ascii")).hexdigest()
+    row = repo.get_refresh_token_by_hash(db_session, token_hash)
+    assert row is not None
+
+    assert repo.consume_refresh_token(db_session, row) is True
+    assert repo.consume_refresh_token(db_session, row) is False

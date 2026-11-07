@@ -51,6 +51,7 @@ from knuckles.core.exceptions import (
 from knuckles.core.state_jwt import issue_state, verify_state
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
+from knuckles.services._tenant_config import resolve_tenant_fields
 
 _REGISTER_PURPOSE = "passkey_register"
 _AUTHENTICATE_PURPOSE = "passkey_auth"
@@ -109,20 +110,46 @@ class _WebAuthnConfig:
 def _resolve_config(session: Session, app_client_id: str) -> _WebAuthnConfig:
     """Look up the tenant's WebAuthn config, falling back to env.
 
+    ``webauthn_rp_id`` and ``webauthn_origin`` form an atomic group —
+    a tenant RP id paired with the operator origin (or vice versa)
+    fails every ceremony at verification time, so the mix is rejected
+    up front. ``rp_name`` is cosmetic: a tenant with its own RP but no
+    explicit name shows its ``app_name`` rather than leaking the
+    operator's brand onto the passkey prompt.
+
     Args:
         session: Active SQLAlchemy session for the AppClient lookup.
         app_client_id: ``app_clients.client_id`` of the caller.
 
     Returns:
         A :class:`_WebAuthnConfig` populated from the per-tenant
-        columns, with operator env vars filling in any nulls.
+        columns, with operator env vars filling in a fully-NULL group.
+
+    Raises:
+        AppError: With code ``TENANT_CONFIG_INCOMPLETE`` when the
+            group is partially configured or the env fallback has
+            been retired.
     """
     settings = get_settings()
     client = repo.get_app_client(session, app_client_id)
+    resolved = resolve_tenant_fields(
+        client,
+        group="webauthn",
+        fields={
+            "webauthn_rp_id": settings.webauthn_rp_id,
+            "webauthn_origin": settings.webauthn_origin,
+        },
+    )
+    if client is not None and client.webauthn_rp_name:
+        rp_name = client.webauthn_rp_name
+    elif client is not None and client.webauthn_rp_id:
+        rp_name = client.app_name
+    else:
+        rp_name = settings.webauthn_rp_name
     return _WebAuthnConfig(
-        rp_id=(client and client.webauthn_rp_id) or settings.webauthn_rp_id,
-        rp_name=(client and client.webauthn_rp_name) or settings.webauthn_rp_name,
-        origin=(client and client.webauthn_origin) or settings.webauthn_origin,
+        rp_id=resolved["webauthn_rp_id"],
+        rp_name=rp_name,
+        origin=resolved["webauthn_origin"],
     )
 
 

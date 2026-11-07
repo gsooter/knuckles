@@ -11,8 +11,9 @@ import uuid
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import CursorResult, delete, select, update
+from sqlalchemy import CursorResult, delete, func, select, update
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from knuckles.data.models import (
     AppClient,
@@ -23,6 +24,22 @@ from knuckles.data.models import (
     User,
     UserOAuthProvider,
 )
+
+
+class _Unset:
+    """Sentinel type distinguishing "argument absent" from explicit ``None``.
+
+    Profile updates need three-way semantics: a field can be set to a
+    value, cleared with ``None``, or left untouched when the caller
+    never mentioned it. A default of ``None`` cannot express the third
+    state, so optional update parameters default to the module-level
+    :data:`_UNSET` instance instead.
+    """
+
+    __slots__ = ()
+
+
+_UNSET = _Unset()
 
 # ---------------------------------------------------------------------------
 # Users
@@ -82,6 +99,72 @@ def get_user_by_email(session: Session, email: str) -> User | None:
     """
     stmt = select(User).where(User.email == email)
     return session.execute(stmt).scalar_one_or_none()
+
+
+def update_user_profile(
+    session: Session,
+    user: User,
+    *,
+    display_name: str | None | _Unset = _UNSET,
+    avatar_url: str | None | _Unset = _UNSET,
+) -> User:
+    """Apply a partial profile update to a user row.
+
+    Parameters left at the :data:`_UNSET` sentinel keep their current
+    value; an explicit ``None`` clears the column. That distinction is
+    what lets ``PATCH /v1/me`` treat an absent body key and a JSON
+    ``null`` differently.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user: The user row to update.
+        display_name: New display name, ``None`` to clear, or absent.
+        avatar_url: New avatar URL, ``None`` to clear, or absent.
+
+    Returns:
+        The same ``User`` with the requested fields applied.
+    """
+    if not isinstance(display_name, _Unset):
+        user.display_name = display_name
+    if not isinstance(avatar_url, _Unset):
+        user.avatar_url = avatar_url
+    session.flush()
+    return user
+
+
+def update_user_email(session: Session, user: User, *, email: str) -> User:
+    """Rewrite a user's canonical email address.
+
+    Callers are responsible for uniqueness checks — the service layer
+    raises ``EMAIL_IN_USE`` before reaching here.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user: The user row to update.
+        email: The new canonical email address.
+
+    Returns:
+        The same ``User`` with the new address applied.
+    """
+    user.email = email
+    session.flush()
+    return user
+
+
+def delete_user(session: Session, user: User) -> None:
+    """Remove a user row.
+
+    Dependent rows (OAuth links, passkeys, refresh tokens) are removed
+    by the ORM cascade / ``ON DELETE CASCADE`` foreign keys. Magic-link
+    rows keyed by email are the caller's job — see
+    :func:`delete_magic_links_for_email`.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user: The user row to delete.
+    """
+    session.delete(user)
+    session.flush()
 
 
 def update_last_seen(session: Session, user: User) -> User:
@@ -199,6 +282,44 @@ def update_oauth_tokens(
 
 
 # ---------------------------------------------------------------------------
+# OAuth provider removal
+# ---------------------------------------------------------------------------
+
+
+def delete_oauth_provider_for_user(
+    session: Session,
+    user_id: uuid.UUID,
+    provider: OAuthProvider,
+) -> bool:
+    """Delete one provider link, scoped to its owning user.
+
+    The ``user_id`` filter is load-bearing — exactly like
+    :func:`delete_passkey_for_user`, it makes it impossible for a
+    request authenticated as user A to unlink user B's provider.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user the link must belong to.
+        provider: Identity provider to unlink.
+
+    Returns:
+        ``True`` if a row was deleted, ``False`` if no matching row
+        existed for this user (the caller decides whether to surface
+        a 404).
+    """
+    stmt = select(UserOAuthProvider).where(
+        UserOAuthProvider.user_id == user_id,
+        UserOAuthProvider.provider == provider,
+    )
+    link = session.execute(stmt).scalar_one_or_none()
+    if link is None:
+        return False
+    session.delete(link)
+    session.flush()
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Magic-link tokens
 # ---------------------------------------------------------------------------
 
@@ -210,6 +331,8 @@ def create_magic_link_token(
     token_hash: str,
     expires_at: datetime,
     user_id: uuid.UUID | None = None,
+    app_client_id: str | None = None,
+    purpose: str = "sign_in",
 ) -> MagicLinkToken:
     """Insert a pending magic-link token row.
 
@@ -219,7 +342,13 @@ def create_magic_link_token(
         token_hash: SHA-256 hex digest of the raw token.
         expires_at: Hard expiry of the token.
         user_id: Optional user id — left ``None`` for first-time
-            addresses and populated on redemption.
+            addresses and populated on redemption. The email-change
+            ceremony sets it at mint time.
+        app_client_id: ``app_clients.client_id`` the link was issued
+            through; verification rejects redemption via any other
+            client (Decision #019).
+        purpose: Ceremony tag — ``"sign_in"`` (default) or
+            ``"email_change"``. Verification requires an exact match.
 
     Returns:
         The newly created ``MagicLinkToken``.
@@ -229,6 +358,8 @@ def create_magic_link_token(
         token_hash=token_hash,
         expires_at=expires_at,
         user_id=user_id,
+        app_client_id=app_client_id,
+        purpose=purpose,
     )
     session.add(token)
     session.flush()
@@ -269,6 +400,25 @@ def mark_magic_link_used(
     token.user_id = user_id
     session.flush()
     return token
+
+
+def delete_magic_links_for_email(session: Session, *, email: str) -> int:
+    """Delete every magic-link row issued to one email address.
+
+    Backs account deletion: a pending sign-in or email-change link for
+    a deleted account must not stay redeemable.
+
+    Args:
+        session: Active SQLAlchemy session.
+        email: Address whose rows are deleted.
+
+    Returns:
+        The number of rows deleted.
+    """
+    stmt = delete(MagicLinkToken).where(MagicLinkToken.email == email)
+    result = cast("CursorResult[object]", session.execute(stmt))
+    session.flush()
+    return int(result.rowcount or 0)
 
 
 def delete_expired_magic_links(session: Session, *, older_than: datetime) -> int:
@@ -385,6 +535,24 @@ def update_passkey_sign_count(
     return cred
 
 
+def count_passkeys(session: Session) -> int:
+    """Count every passkey credential row in the table.
+
+    Backs the ``webauthn_rp_id`` immutability guardrail: changing the
+    relying-party id invalidates each credential minted against the
+    prior value, so the admin surface refuses the change while any
+    rows exist (absent an explicit force).
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        Total number of ``passkey_credentials`` rows.
+    """
+    stmt = select(func.count()).select_from(PasskeyCredential)
+    return int(session.execute(stmt).scalar_one())
+
+
 def delete_passkey(session: Session, cred: PasskeyCredential) -> None:
     """Remove a passkey credential row.
 
@@ -480,6 +648,77 @@ def get_app_client(session: Session, client_id: str) -> AppClient | None:
     return session.get(AppClient, client_id)
 
 
+def list_app_clients(session: Session) -> list[AppClient]:
+    """Return every registered ``AppClient`` ordered by client id.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        All ``app_clients`` rows sorted by ``client_id`` (possibly
+        empty).
+    """
+    stmt = select(AppClient).order_by(AppClient.client_id)
+    return list(session.execute(stmt).scalars().all())
+
+
+def rotate_app_client_secret(
+    session: Session,
+    client_id: str,
+    *,
+    new_secret_hash: str,
+) -> AppClient | None:
+    """Replace the stored secret hash on an existing ``AppClient``.
+
+    Deliberately separate from :func:`update_app_client_config` — the
+    tenant-config allow-list must stay unable to touch
+    ``client_secret_hash``.
+
+    Args:
+        session: Active SQLAlchemy session.
+        client_id: Target ``app_clients.client_id``.
+        new_secret_hash: SHA-256 hex digest of the new plaintext
+            secret.
+
+    Returns:
+        The updated ``AppClient``, or ``None`` if no row matches.
+    """
+    client = session.get(AppClient, client_id)
+    if client is None:
+        return None
+    client.client_secret_hash = new_secret_hash
+    session.flush()
+    return client
+
+
+def set_app_client_origins(
+    session: Session,
+    client_id: str,
+    *,
+    allowed_origins: list[str],
+) -> AppClient | None:
+    """Replace the entire ``allowed_origins`` list on an ``AppClient``.
+
+    Like :func:`rotate_app_client_secret`, this is kept outside the
+    tenant-config allow-list on purpose — origins gate redirect-URL
+    trust and deserve their own explicit seam.
+
+    Args:
+        session: Active SQLAlchemy session.
+        client_id: Target ``app_clients.client_id``.
+        allowed_origins: The new complete list of allowed origins.
+
+    Returns:
+        The updated ``AppClient``, or ``None`` if no row matches.
+    """
+    client = session.get(AppClient, client_id)
+    if client is None:
+        return None
+    client.allowed_origins = list(allowed_origins)
+    session.flush()
+    return client
+
+
 # Set of attributes that ``update_app_client_config`` is allowed to set.
 # Restricting writes to this allow-list prevents the CLI from being
 # turned into a generic ``UPDATE app_clients SET <anything>`` shim —
@@ -537,6 +776,83 @@ def update_app_client_config(
         setattr(client, attr, value)
     session.flush()
     return client
+
+
+_ENCRYPTED_APP_CLIENT_COLUMNS = (
+    "resend_api_key",
+    "google_oauth_client_secret",
+    "apple_oauth_private_key",
+)
+
+
+def reencrypt_app_client_secrets(session: Session) -> int:
+    """Rewrite every populated encrypted column under the primary key.
+
+    Backs ``scripts/reencrypt_tenant_secrets.py`` (the Fernet rotation
+    promised by Decision #017). Reading an encrypted column decrypts
+    it with whichever key in the ``KNUCKLES_SECRETS_KEY`` list
+    matches; flagging the attribute dirty forces the next flush to
+    re-encrypt the plaintext with the list's primary (first) key.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        Number of ``app_clients`` rows that carried at least one
+        encrypted value and were rewritten.
+    """
+    rewritten = 0
+    for client in session.execute(select(AppClient)).scalars():
+        touched = False
+        for column in _ENCRYPTED_APP_CLIENT_COLUMNS:
+            if getattr(client, column):
+                flag_modified(client, column)
+                touched = True
+        if touched:
+            rewritten += 1
+    session.flush()
+    return rewritten
+
+
+def delete_expired_refresh_tokens(session: Session, *, older_than: datetime) -> int:
+    """Delete refresh-token rows whose ``expires_at`` is before a cutoff.
+
+    Consumed rows are retained only for reuse detection, and an
+    expired token can never rotate — so purging past-expiry rows
+    keeps the table bounded without weakening the reuse guarantee.
+
+    Args:
+        session: Active SQLAlchemy session.
+        older_than: Cutoff timestamp; rows expired before this are
+            deleted.
+
+    Returns:
+        The number of rows deleted.
+    """
+    stmt = delete(RefreshToken).where(RefreshToken.expires_at < older_than)
+    result = cast("CursorResult[object]", session.execute(stmt))
+    session.flush()
+    return int(result.rowcount or 0)
+
+
+def ping(session: Session) -> bool:
+    """Execute a trivial query to prove database connectivity.
+
+    Backs the deep ``/health`` probe: a worker whose pool is exhausted
+    or whose database is down should report degraded instead of green.
+
+    Args:
+        session: Active SQLAlchemy session.
+
+    Returns:
+        True when the round trip succeeds.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: Propagated when the database
+            is unreachable.
+    """
+    session.execute(select(1))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -604,16 +920,136 @@ def mark_refresh_token_used(session: Session, token: RefreshToken) -> RefreshTok
     return token
 
 
-def revoke_all_refresh_tokens_for_user(session: Session, user_id: uuid.UUID) -> int:
+def consume_refresh_token(session: Session, token: RefreshToken) -> bool:
+    """Atomically claim a refresh token for rotation.
+
+    Issues a conditional ``UPDATE ... WHERE used_at IS NULL`` so two
+    concurrent rotations of the same token admit exactly one winner —
+    the read-then-write pattern alone would let both racers pass the
+    reuse check under READ COMMITTED.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token: The refresh-token row to consume.
+
+    Returns:
+        True if this caller consumed the token; False if it was
+        already consumed (a concurrent or prior use).
+    """
+    now = datetime.now(tz=UTC)
+    stmt = (
+        update(RefreshToken)
+        .where(RefreshToken.id == token.id, RefreshToken.used_at.is_(None))
+        .values(used_at=now)
+    )
+    result = cast("CursorResult[object]", session.execute(stmt))
+    session.flush()
+    if int(result.rowcount or 0) == 1:
+        session.expire(token, ["used_at"])
+        return True
+    return False
+
+
+def list_active_refresh_tokens_for_user(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    app_client_id: str,
+    now: datetime,
+) -> list[RefreshToken]:
+    """Return a user's active refresh tokens for one app client.
+
+    Active means ``used_at IS NULL`` and ``expires_at`` after ``now``.
+    Because rotation replaces rows, the returned ids change on every
+    refresh — this is a point-in-time view, not a stable session
+    handle.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the owning user.
+        app_client_id: ``app_clients.client_id`` to scope the list to.
+        now: Wall-clock UTC instant used for the expiry comparison.
+
+    Returns:
+        Matching ``RefreshToken`` rows ordered by creation time
+        (possibly empty).
+    """
+    stmt = (
+        select(RefreshToken)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.app_client_id == app_client_id,
+            RefreshToken.used_at.is_(None),
+            RefreshToken.expires_at > now,
+        )
+        .order_by(RefreshToken.created_at)
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def revoke_refresh_token_by_id(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    app_client_id: str,
+    token_id: uuid.UUID,
+) -> bool:
+    """Revoke one refresh token by id, scoped to its owner and tenant.
+
+    The ``(user_id, app_client_id)`` filter is load-bearing — exactly
+    like :func:`delete_passkey_for_user`, it makes it impossible for a
+    request authenticated as user A (or calling through tenant B) to
+    revoke a session it does not own. Rows that are already consumed
+    or expired report ``False`` so the caller can 404.
+
+    Args:
+        session: Active SQLAlchemy session.
+        user_id: UUID of the user the token must belong to.
+        app_client_id: ``app_clients.client_id`` the token must have
+            been issued for.
+        token_id: Primary key of the ``refresh_tokens`` row.
+
+    Returns:
+        ``True`` if an active row was revoked, ``False`` if no
+        matching active row existed for this user and client.
+    """
+    now = datetime.now(tz=UTC)
+    stmt = select(RefreshToken).where(
+        RefreshToken.id == token_id,
+        RefreshToken.user_id == user_id,
+        RefreshToken.app_client_id == app_client_id,
+        RefreshToken.used_at.is_(None),
+        RefreshToken.expires_at > now,
+    )
+    row = session.execute(stmt).scalar_one_or_none()
+    if row is None:
+        return False
+    row.used_at = now
+    session.flush()
+    return True
+
+
+def revoke_all_refresh_tokens_for_user(
+    session: Session,
+    user_id: uuid.UUID,
+    *,
+    app_client_id: str | None = None,
+) -> int:
     """Mark every still-active refresh token for a user as used.
 
-    Used as the reuse-detection response: once a consumed refresh
-    token is re-presented, every outstanding token for the user is
-    invalidated so the attacker's copy cannot rotate again.
+    Two callers, two scopes:
+
+    * Reuse detection passes no ``app_client_id`` — a re-presented
+      consumed token is a compromise signal, so every session across
+      every consuming app is revoked (Decision #008).
+    * User-initiated "sign out everywhere" passes the calling client
+      so one tenant cannot destroy the user's sessions in another.
 
     Args:
         session: Active SQLAlchemy session.
         user_id: UUID of the user whose tokens should be revoked.
+        app_client_id: When given, restrict the revocation to tokens
+            issued for this app client.
 
     Returns:
         Number of rows revoked.
@@ -624,6 +1060,8 @@ def revoke_all_refresh_tokens_for_user(session: Session, user_id: uuid.UUID) -> 
         .where(RefreshToken.user_id == user_id, RefreshToken.used_at.is_(None))
         .values(used_at=now)
     )
+    if app_client_id is not None:
+        stmt = stmt.where(RefreshToken.app_client_id == app_client_id)
     result = cast("CursorResult[object]", session.execute(stmt))
     session.flush()
     return int(result.rowcount or 0)

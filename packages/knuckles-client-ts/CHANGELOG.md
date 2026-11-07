@@ -19,6 +19,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 _Nothing yet._
 
+## [0.1.1] — 2026-06-12
+
+### Added
+
+- **Account management** under `client.me`, which is now callable
+  *and* a namespace — `client.me({ accessToken })` returns the
+  `UserProfile` exactly as before:
+  - `me.updateProfile({ accessToken, displayName?, avatarUrl? })` —
+    `PATCH /v1/me`; only the fields you pass are sent, and an
+    explicit `null` clears the field server-side.
+  - `me.deleteAccount({ accessToken })` — `DELETE /v1/me`.
+  - `me.listProviders({ accessToken })` — `GET /v1/me/providers`.
+  - `me.unlinkProvider({ accessToken, provider })` —
+    `DELETE /v1/me/providers/{provider}`.
+  - `me.startEmailChange({ accessToken, newEmail, redirectUrl })` —
+    `POST /v1/me/email/start`.
+  - `me.verifyEmailChange(token)` — `POST /v1/me/email/verify`
+    (client headers only).
+- **Sessions** sub-client: `sessions.list({ accessToken })`
+  (`GET /v1/sessions`) and `sessions.revoke({ accessToken, sessionId })`
+  (`DELETE /v1/sessions/{sessionId}`).
+- **Admin** sub-client, active when the client is constructed with
+  the new `adminToken` option. Admin calls authenticate with
+  `X-Admin-Token` (app-client headers are not sent):
+  `admin.createAppClient`, `admin.listAppClients`,
+  `admin.getAppClient`, `admin.updateAppClient`, `admin.rotateSecret`,
+  `admin.setOrigins`. Calling any admin method without `adminToken`
+  throws a plain `Error` immediately.
+- `KnucklesTokenExpiredError` (subclass of `KnucklesTokenError`) —
+  thrown by `verifyAccessToken` when the only problem is an expired
+  `exp`. The underlying `jose` `JWTExpired` error is attached as
+  `cause` (part of the contract). All token errors now carry their
+  `jose` cause.
+- `KnucklesRateLimitError.retryAfter` — whole-second retry hint
+  parsed from the `Retry-After` response header (`null` when absent
+  or in the unparsed HTTP-date form).
+- `jwksHeaders` constructor option — extra HTTP headers on the JWKS
+  fetch. The `User-Agent` now defaults to
+  `knuckles-client-ts/<version>` (Node-side; browsers strip forbidden
+  headers), and the JWKS fetch now uses the client's `timeoutMs`.
+
+### Compatibility
+
+- Fully backward compatible. `me` changed from a method to a callable
+  property, but `client.me({ accessToken })` behaves identically. The
+  new account/session/admin methods return the server's `data`
+  payload as plain records. Account, session, and admin endpoints
+  require a Knuckles server that ships them; older servers return 404.
+
 ## [0.1.0] — 2026-04-26
 
 Initial release.

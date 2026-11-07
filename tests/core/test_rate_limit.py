@@ -44,3 +44,28 @@ def test_reset_drops_all_state() -> None:
     assert limiter.allow("k") is False
     limiter.reset()
     assert limiter.allow("k") is True
+
+
+def test_seconds_until_allowed_is_zero_with_budget() -> None:
+    """A key with remaining budget reports zero wait."""
+    limiter = RateLimiter(max_requests=2, window_seconds=60)
+    assert limiter.allow("k")
+    assert limiter.seconds_until_allowed("k") == 0
+
+
+def test_seconds_until_allowed_reports_window_remainder() -> None:
+    """An exhausted key reports when its oldest event expires."""
+    now = [1000.0]
+    limiter = RateLimiter(max_requests=2, window_seconds=60, clock=lambda: now[0])
+    assert limiter.allow("k")
+    now[0] = 1010.0
+    assert limiter.allow("k")
+    assert not limiter.allow("k")
+    # Oldest event at t=1000 leaves the 60s window at t=1060 — 50s away.
+    assert limiter.seconds_until_allowed("k") == 50
+
+
+def test_seconds_until_allowed_unknown_key_is_zero() -> None:
+    """A never-seen key has full budget."""
+    limiter = RateLimiter(max_requests=1, window_seconds=60)
+    assert limiter.seconds_until_allowed("nobody") == 0

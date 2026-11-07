@@ -34,6 +34,12 @@ class Settings(BaseSettings):
             ceremony-state JWTs (OAuth ``state``, passkey challenge
             wrappers). Deliberately separate from the RS256 signing key
             because state tokens never leave Knuckles.
+        knuckles_admin_token: Bearer token for the operator
+            provisioning API under ``/v1/admin/*``. Compared against
+            the ``X-Admin-Token`` request header in constant time.
+            Empty (the default) disables the admin surface entirely —
+            every admin route 404s as if it did not exist, so existing
+            deployments keep a zero admin attack surface.
         knuckles_secrets_key: Fernet key for encrypting per-tenant
             secret-bearing columns on ``app_clients`` (Resend API key,
             Google OAuth client secret, Apple OAuth private key). A
@@ -86,8 +92,18 @@ class Settings(BaseSettings):
     knuckles_access_token_ttl_seconds: int = 3600
     knuckles_refresh_token_ttl_seconds: int = 30 * 24 * 3600
 
+    # Graceful signing-key rotation: comma-separated "kid:base64pem"
+    # entries for keys that no longer sign but whose outstanding tokens
+    # haven't expired. Each stays published in the JWKS and accepted by
+    # verify_access_token until removed. PEM may be the retired private
+    # key (its public half is derived) or the public key alone.
+    knuckles_jwt_retired_keys: str = ""
+
     # Ceremony state
     knuckles_state_secret: str
+
+    # Operator provisioning API (empty disables the /v1/admin surface)
+    knuckles_admin_token: str = ""
 
     # Per-tenant secret encryption (Decision #017)
     knuckles_secrets_key: str = ""
@@ -113,6 +129,15 @@ class Settings(BaseSettings):
     webauthn_rp_id: str = "localhost"
     webauthn_rp_name: str = "Knuckles"
     webauthn_origin: str = "http://localhost:3000"
+
+    # Per-tenant config fallback (Decision #017 / #020).
+    # When ``True`` (default), an app client whose tenant-config group
+    # is entirely NULL inherits the operator-level env vars above —
+    # the transition mechanism for the original single-tenant deploy.
+    # Flip to ``False`` once every tenant row is fully provisioned:
+    # from then on a NULL group is a loud TENANT_CONFIG_INCOMPLETE
+    # error instead of a silent run on another tenant's credentials.
+    knuckles_allow_env_tenant_fallback: bool = True
 
     # CORS
     # When ``False`` (default), Knuckles emits ``Access-Control-Allow-Origin: *``

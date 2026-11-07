@@ -29,6 +29,7 @@ import knuckles.services.magic_link as magic_link_service_mod
 from knuckles.app import create_app
 from knuckles.core.jwt import issue_access_token
 from knuckles.core.rate_limit import magic_link_limiter
+from knuckles.data.models import RefreshToken
 from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 
@@ -297,7 +298,9 @@ def test_magic_link_rate_limit_returns_429(
 ) -> None:
     """Once the per-email budget is exhausted, ``/start`` returns 429."""
     monkeypatch.setattr(
-        magic_link_service_mod, "get_default_sender", lambda **_: _SilentSender()
+        magic_link_service_mod,
+        "get_default_sender",
+        lambda api_key=None, from_address=None: _SilentSender(),
     )
 
     # Exhaust the limiter for this email.
@@ -329,7 +332,9 @@ def test_magic_link_start_rejects_unregistered_redirect(
 ) -> None:
     """A redirect URL outside the app-client's allowed origins is 422."""
     monkeypatch.setattr(
-        magic_link_service_mod, "get_default_sender", lambda **_: _SilentSender()
+        magic_link_service_mod,
+        "get_default_sender",
+        lambda api_key=None, from_address=None: _SilentSender(),
     )
     response = client.post(
         "/v1/auth/magic-link/start",
@@ -367,3 +372,132 @@ class _SilentSender:
             from_name: Optional display name (ignored).
         """
         return None
+
+
+# ---------------------------------------------------------------------------
+# Audience pinning + tenant-scoped logout/all
+# ---------------------------------------------------------------------------
+
+
+def _register_second_client(db_session: Session) -> tuple[str, str]:
+    """Register a second app client to model tenant B.
+
+    Args:
+        db_session: Active SQLAlchemy session.
+
+    Returns:
+        Tuple of (client_id, plaintext secret) for the second tenant.
+    """
+    client_id = "other-app"
+    secret = "other-secret"
+    repo.create_app_client(
+        db_session,
+        client_id=client_id,
+        app_name="Other App",
+        client_secret_hash=hashlib.sha256(secret.encode("ascii")).hexdigest(),
+        allowed_origins=["http://localhost:4000"],
+    )
+    return client_id, secret
+
+
+def test_me_rejects_cross_tenant_token(
+    client: FlaskClient,
+    db_session: Session,
+    app_client_creds: tuple[str, str],
+) -> None:
+    """Tenant B's client credentials cannot use tenant A's user token.
+
+    The token's ``aud`` must match the calling ``X-Client-Id`` —
+    otherwise any registered tenant could read another tenant's user
+    profiles with a leaked access token (confused deputy).
+    """
+    other_creds = _register_second_client(db_session)
+    user = repo.create_user(db_session, email="victim@example.com")
+
+    headers = {
+        **_client_headers(other_creds),
+        **_bearer_for(str(user.id), app_client_creds[0]),
+    }
+    response = client.get("/v1/me", headers=headers)
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "INVALID_TOKEN"
+
+
+def test_logout_all_rejects_cross_tenant_token(
+    client: FlaskClient,
+    db_session: Session,
+    app_client_creds: tuple[str, str],
+) -> None:
+    """Tenant B cannot revoke a user's sessions with tenant A's token."""
+    other_creds = _register_second_client(db_session)
+    user = repo.create_user(db_session, email="victim2@example.com")
+    tokens.issue_session(db_session, user_id=user.id, app_client_id=app_client_creds[0])
+
+    headers = {
+        **_client_headers(other_creds),
+        **_bearer_for(str(user.id), app_client_creds[0]),
+    }
+    response = client.post("/v1/logout/all", headers=headers)
+    assert response.status_code == 401
+    assert response.get_json()["error"]["code"] == "INVALID_TOKEN"
+
+    # The victim's session survives the rejected cross-tenant call.
+    active = [
+        row for row in db_session.query(RefreshToken).all() if row.used_at is None
+    ]
+    assert len(active) == 1
+
+
+def test_logout_all_is_scoped_to_the_calling_tenant(
+    client: FlaskClient,
+    db_session: Session,
+    app_client_creds: tuple[str, str],
+) -> None:
+    """Sign-out-everywhere only touches the calling app's sessions.
+
+    A shared identity signed in to two consuming apps keeps its
+    tenant-B session when tenant A asks for a full sign-out — the
+    cross-tenant blast radius is reserved for the reuse-detection
+    security response.
+    """
+    other_id, _ = _register_second_client(db_session)
+    client_id, _ = app_client_creds
+    user = repo.create_user(db_session, email="shared@example.com")
+    tokens.issue_session(db_session, user_id=user.id, app_client_id=client_id)
+    pair_other = tokens.issue_session(
+        db_session, user_id=user.id, app_client_id=other_id
+    )
+
+    headers = {
+        **_client_headers(app_client_creds),
+        **_bearer_for(str(user.id), client_id),
+    }
+    response = client.post("/v1/logout/all", headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["data"]["revoked"] == 1
+
+    other_hash = hashlib.sha256(pair_other.refresh_token.encode("ascii")).hexdigest()
+    row = repo.get_refresh_token_by_hash(db_session, other_hash)
+    assert row is not None and row.used_at is None
+
+
+def test_magic_link_rate_limit_carries_retry_after_header(
+    client: FlaskClient,
+    app_client_creds: tuple[str, str],
+) -> None:
+    """429 responses carry the Retry-After header errors.md promises."""
+    bucket = f"{app_client_creds[0]}:victim@example.com"
+    for _ in range(5):
+        assert magic_link_limiter.allow(bucket)
+
+    response = client.post(
+        "/v1/auth/magic-link/start",
+        json={
+            "email": "victim@example.com",
+            "redirect_url": "http://localhost:3000/auth/verify",
+        },
+        headers=_client_headers(app_client_creds),
+    )
+    assert response.status_code == 429
+    retry_after = response.headers.get("Retry-After")
+    assert retry_after is not None and int(retry_after) > 0

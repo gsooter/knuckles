@@ -7,16 +7,19 @@ from flask.wrappers import Response
 from werkzeug.exceptions import HTTPException
 
 from knuckles.api.v1 import api_v1
+from knuckles.core import database
 from knuckles.core.config import get_settings
 from knuckles.core.database import init_db
 from knuckles.core.exceptions import AppError
-from knuckles.core.jwt import get_jwks
+from knuckles.core.jwt import get_jwks, get_signing_key
 from knuckles.core.logging import get_logger, setup_logging
 from knuckles.core.observability import (
     get_request_id,
     init_request_correlation,
     request_context,
 )
+from knuckles.core.secrets import get_fernet
+from knuckles.data.repositories import auth as auth_repo
 
 # Browser caches and consuming-app JWKS clients should not refetch the
 # key set on every token verification — but should refetch frequently
@@ -35,6 +38,14 @@ def create_app() -> Flask:
 
     setup_logging(debug=settings.debug)
 
+    # Fail at boot, not at first sign-in: a malformed signing key (or
+    # secrets key) should crash the worker while the deploy can still
+    # be rolled back, instead of passing /health and 500ing every
+    # ceremony. The state secret is enforced by Settings itself.
+    get_signing_key()
+    if settings.knuckles_secrets_key:
+        get_fernet()
+
     app = Flask(__name__)
     app.config["DEBUG"] = settings.debug
 
@@ -48,10 +59,21 @@ def create_app() -> Flask:
     def health() -> tuple[dict[str, str], int]:
         """Health check endpoint for load balancers and uptime monitors.
 
+        Performs a one-query database round trip so a dead database or
+        exhausted pool reports 503 instead of green while every real
+        request fails.
+
         Returns:
-            Tuple of JSON response body and HTTP 200 status code.
+            Tuple of JSON response body and HTTP 200, or 503 when the
+            database is unreachable.
         """
-        return {"status": "ok"}, 200
+        session = database.get_db()
+        try:
+            auth_repo.ping(session)
+        except Exception:
+            session.rollback()
+            return {"status": "degraded", "database": "unreachable"}, 503
+        return {"status": "ok", "database": "ok"}, 200
 
     @app.route("/.well-known/jwks.json")
     @app.route("/v1/auth/jwks")
@@ -120,7 +142,9 @@ def _register_error_handlers(app: Flask) -> None:
     error_log = get_logger("errors")
 
     @app.errorhandler(AppError)
-    def handle_app_error(error: AppError) -> tuple[dict[str, Any], int]:
+    def handle_app_error(
+        error: AppError,
+    ) -> tuple[dict[str, Any], int, dict[str, str]]:
         """Log + return a standardized JSON body for a known ``AppError``.
 
         Every ``AppError`` is logged at WARNING with full request
@@ -131,7 +155,8 @@ def _register_error_handlers(app: Flask) -> None:
             error: The raised ``AppError`` instance.
 
         Returns:
-            Tuple of JSON error response and the error's HTTP status.
+            Tuple of JSON error response, the error's HTTP status, and
+            any extra headers the error carries (e.g. ``Retry-After``).
         """
         ctx = request_context()
         error_log.warning(
@@ -141,7 +166,11 @@ def _register_error_handlers(app: Flask) -> None:
             error.message,
             " ".join(f"{k}={v!r}" for k, v in ctx.items()),
         )
-        return _error_envelope(error.code, error.message), error.status_code
+        return (
+            _error_envelope(error.code, error.message),
+            error.status_code,
+            error.headers,
+        )
 
     @app.errorhandler(HTTPException)
     def handle_http_error(error: HTTPException) -> tuple[dict[str, Any], int]:
@@ -214,7 +243,7 @@ def _error_envelope(code: str, message: str) -> dict[str, Any]:
     return body
 
 
-def _add_cors_headers(response):  # type: ignore[no-untyped-def]
+def _add_cors_headers(response: Response) -> Response:
     """Attach CORS headers to every response.
 
     In permissive mode (``KNUCKLES_STRICT_CORS=false``, the default)

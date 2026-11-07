@@ -929,9 +929,256 @@ also the only consuming-app maintainer in practice.
   population into the `greenroom-prod` row.
 
 
+### 018 — Dual-Auth Routes Pin Token Audience; logout/all Is Tenant-Scoped
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** Every route that authenticates both the calling app
+(`X-Client-Id` + `X-Client-Secret`) and the user (bearer access token)
+— today `GET /v1/me` and `POST /v1/logout/all` — asserts that the
+token's `aud` claim equals the calling client's `client_id`, raising
+`INVALID_TOKEN` (401) on mismatch. Additionally,
+`POST /v1/logout/all` revokes only the refresh tokens the user holds
+**with the calling app client**, not across every tenant.
+
+The reuse-detection response (Decision #008) keeps its deliberately
+global blast radius: a re-presented consumed refresh token still
+revokes the user's sessions across every consuming app, because that
+path signals compromise rather than user intent.
+
+**Rationale:**
+Without audience pinning, any registered tenant holding a leaked
+access token minted for another tenant could read that user's profile
+or destroy their sessions — a confused-deputy hole that only opens
+once a second tenant exists, which is exactly when it's hardest to
+retrofit. A tenant's own tokens always carry its own `client_id` as
+`aud`, so the pin is invisible to correct integrations (Greenroom
+included; verified against its SDK call sites).
+
+Scoping logout/all is the right multi-tenant default: "sign out of
+all my devices" is something a user asks one app for; silently
+destroying their sessions in unrelated apps would be surprising and
+would let any single tenant grief a shared identity.
+
+**Alternatives considered:**
+- **Verify `aud` inside `verify_access_token` for all routes** —
+  rejected. Bearer-only routes (passkey register/list/delete) have no
+  client headers to compare against; their tenant context *is* the
+  verified `aud`. Pinning belongs where both identities are present.
+- **Keep logout/all global and document it** — rejected. The
+  cross-tenant revoke is a security response, not a user-facing
+  feature; conflating the two makes the blast radius of a UI button
+  equal to that of a compromise signal.
+
+**Consequences:**
+- `revoke_all_refresh_tokens_for_user` gains an optional
+  `app_client_id` filter; reuse detection passes none.
+- The route layer calls the new `tokens.revoke_all_sessions` service
+  function instead of reaching into the repository (which also fixes
+  a layering violation).
+- A future cross-tenant "sign out everywhere, everywhere" operation,
+  if ever wanted, must be a new deliberate endpoint with its own
+  DECISIONS entry.
+
+### 019 — Magic Links Are Bound To Their Issuing App Client
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** `magic_link_tokens` gains a nullable `app_client_id`
+FK recorded at mint time. `verify_magic_link` rejects redemption
+(`MAGIC_LINK_INVALID`) when the row's client differs from the
+verifying caller's. Rows with a NULL client (minted before this
+landed) verify unscoped until their 15-minute TTL expires, so no
+deploy coordination is needed.
+
+**Rationale:**
+The raw token is the email recipient's secret, but the verify
+endpoint issues a session for whatever `aud` the *calling client*
+asserts. Without binding, a link branded and origin-validated for
+tenant A could be redeemed through tenant B's client credentials,
+minting a tenant-B session — a confused-deputy path between tenants.
+The column also gives the cleanup script a per-tenant axis for free.
+
+**Alternatives considered:**
+- **Embed the client id in the token itself (signed)** — rejected.
+  Doubles the token format's complexity; the DB row already exists
+  and the hash lookup already happens on every verify.
+- **Make the column non-nullable with a backfill** — rejected.
+  Pending rows can't be attributed retroactively; a 15-minute TTL
+  makes the legacy window self-closing.
+
+**Consequences:**
+- CLAUDE.md's table list now records the column.
+- Greenroom is unaffected: it both mints and verifies through the
+  same client credentials.
+
+### 020 — Tenant Config Groups Resolve Atomically; Fallback Retirement Is A Flag
+
+**Date:** 2026-06-12
+**Status:** Decided (amends #017's resolution semantics)
+
+**Decision:** Per-tenant config resolution moves from four hand-rolled
+per-field `(client.X) or settings.X` expressions into one shared
+resolver (`knuckles/services/_tenant_config.py`) with two new rules:
+
+1. **Atomic groups.** Google OAuth (`client_id` + `client_secret`),
+   Apple OAuth (all four fields), and WebAuthn (`rp_id` + `origin`)
+   must be all-tenant or all-env. A partially configured group raises
+   `TENANT_CONFIG_INCOMPLETE` (500, new error code) at ceremony start
+   instead of silently pairing a tenant client id with the operator's
+   secret — a guaranteed provider-side failure that previously
+   surfaced as an opaque auth error at sign-in time. Resend stays
+   non-atomic (a tenant may override only its From address during the
+   transition), and `webauthn_rp_name` is cosmetic — defaulting to
+   the tenant's `app_name` when the tenant has its own RP, so the
+   operator's brand never appears on another tenant's passkey prompt.
+
+2. **Enforceable retirement.** `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK`
+   (default `true`) gates the env fallback. #017 promised the
+   fallback "retires once a second tenant is provisioned" but had no
+   mechanism; flipping this to `false` once every tenant row is
+   populated turns any residual NULL group into a loud error instead
+   of a silent run on the operator's (greenroom's) credentials.
+
+**Alternatives considered:**
+- **Refuse env fallback whenever an app_clients row exists** —
+  rejected. The row always exists (client auth loads it), so this
+  would break the legacy greenroom deployment outright.
+- **A `requires_own_config` column per tenant** — rejected for now.
+  A process-level flag matches the actual rollout (one legacy tenant,
+  then a hard cutover); a per-row flag can be added later if tenants
+  migrate one at a time.
+
+**Consequences:**
+- New error code `TENANT_CONFIG_INCOMPLETE` (HTTP 500) in the public
+  vocabulary; the dead `SERVICE_NOT_CONNECTED` constant is removed
+  from `exceptions.py` and `docs/openapi.yaml` in the same change.
+- Greenroom (all-NULL columns, flag at default) is unaffected.
+- The operator playbook for tenant #2: provision its row fully via
+  `configure_app_client.py`, populate greenroom's row, then set
+  `KNUCKLES_ALLOW_ENV_TENANT_FALLBACK=false` and delete the
+  per-tenant env vars.
+
+### 021 — Tenant Provisioning Moves Behind An Opt-In Admin API
+
+**Date:** 2026-06-12
+**Status:** Decided (refines #003's deferral of dynamic registration)
+
+**Decision:** Six routes under `/v1/admin/app-clients*` cover the full
+tenant lifecycle: create (secret shown exactly once), list, get,
+patch tenant config, rotate secret, replace allowed origins. The
+surface is gated by a single high-entropy `KNUCKLES_ADMIN_TOKEN`
+compared in constant time against the `X-Admin-Token` header — and
+when the env var is empty (the default), every admin route returns
+404 as if it did not exist, preserving the previous zero-admin-surface
+posture for any deployment that doesn't opt in. The operator scripts
+(`register_app_client.py`, `configure_app_client.py`) remain as
+break-glass wrappers over the same service functions, and gain
+`--rotate-secret` / `--set-origin` so secret rotation and origin
+changes no longer require hand-written SQL.
+
+Responses never contain decrypted secrets: encrypted columns surface
+only as `*_configured` booleans. The Decision #017 rp_id-immutability
+open question is now enforced in the service layer — changing
+`webauthn_rp_id` while passkeys exist is refused unless explicitly
+forced.
+
+**Alternatives considered:**
+- **Stay scripts-only** — rejected. "Self-service" cannot mean SSH;
+  the host (Railway) doesn't even guarantee shell access to the
+  running container.
+- **Per-operator admin identities** — rejected for now. One shared
+  token matches the single-operator reality; rotation is an env-var
+  change. Revisit if a second operator appears.
+- **OAuth 2.0 Dynamic Client Registration (RFC 7591)** — still
+  deferred; tenants are provisioned by the operator, not
+  self-registered by strangers.
+
+**Consequences:**
+- New optional env var `KNUCKLES_ADMIN_TOKEN`; CLAUDE.md's API list
+  gains the admin column.
+- The SDKs grow an `admin` namespace (Decision #015 obligation).
+- Audit log lines record every provisioning mutation (names only,
+  never secret material).
+
+### 022 — End-User Self-Service: Profile, Sessions, Providers, Deletion
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** Users get first-party control of their identity through
+the consuming app, via new dual-auth (client + bearer, aud-pinned)
+endpoints:
+
+- `PATCH /v1/me` — update / clear `display_name` and `avatar_url`
+  (previously NULL forever for magic-link-only users).
+- `DELETE /v1/me` — full account deletion: revokes every refresh
+  token across all tenants, purges magic-link rows for the email,
+  deletes the user row (FK cascades remove providers + passkeys).
+  This is the GDPR right-to-erasure path; previously erasure meant
+  manual DB surgery.
+- `GET /v1/sessions` + `DELETE /v1/sessions/<id>` — list and revoke
+  individual active sessions, scoped to the calling app client.
+  Session ids are refresh-token row ids and change on rotation; the
+  list is a point-in-time view.
+- `GET /v1/me/providers` + `DELETE /v1/me/providers/<provider>` —
+  see and unlink Google/Apple identities (including links created
+  silently by verified-email auto-matching). Provider tokens and raw
+  profiles are never exposed. No lockout guard is needed: magic-link
+  sign-in always remains available for the email.
+
+**Rationale:** Every consuming app would otherwise build these
+against raw tables it doesn't own. They are identity-shaped (not
+product-shaped), so they belong in Knuckles — and they are additive,
+so no existing consumer changes.
+
+**Consequences:**
+- New error codes `SESSION_NOT_FOUND`, `PROVIDER_NOT_FOUND`.
+- Account deletion is account-wide by design (an account spans
+  tenants); per-tenant "disconnect" is just `logout/all`.
+- SDK methods ship for every endpoint (Decision #015).
+
+### 023 — Email Change Is A Verified Two-Step Magic-Link Flow
+
+**Date:** 2026-06-12
+**Status:** Decided
+
+**Decision:** `POST /v1/me/email/start` (client + bearer) mints a
+magic-link-style token bound to the authenticated user and the NEW
+address, recorded with `purpose='email_change'` on
+`magic_link_tokens` (new column, default `'sign_in'`), and emails the
+new address through the tenant's own sender. `POST /v1/me/email/verify`
+(client) consumes it: purpose, tenant, expiry, and single-use checks
+mirror sign-in verification; an address already on another account
+returns the new `EMAIL_IN_USE` (409). Sign-in verification now
+rejects any row whose purpose isn't `sign_in`, so an email-change
+token can never mint a session.
+
+Sessions are deliberately NOT revoked on change: outstanding access
+tokens carry the old email claim until their next refresh, and
+consuming apps must tolerate that staleness window (≤ access-token
+TTL).
+
+**Alternatives considered:**
+- **Carry the change in a state JWT instead of a row** — rejected;
+  single-use enforcement needs server state anyway, and the table,
+  hashing, TTL, and cleanup already exist.
+- **A native PG enum for purpose** — rejected; a plain string column
+  avoids the enum-migration footgun for a two-value vocabulary.
+
+**Consequences:**
+- CLAUDE.md's `magic_link_tokens` column list gains `purpose`.
+- Greenroom note: it keys users by `sub` and only writes email at
+  first provisioning, so a changed email reaches greenroom rows only
+  if greenroom adds an email-sync on authenticated requests —
+  optional, nothing breaks without it.
 ---
 
-### 018 — SQLAlchemy Is Capped Below 2.1
+### 024 — SQLAlchemy Is Capped Below 2.1
+
+_(Shipped to `main` as Decision 018 in the PR #3 hotfix; renumber on merge.)_
 
 **Date:** 2026-10-01
 **Status:** Decided
@@ -949,3 +1196,64 @@ plus `postgresql+psycopg://` URLs) — the right long-term move, but a
 driver migration deserves its own change and a deploy watched on its
 own, not a ride-along on an email fix. Lift the cap as part of that
 migration.
+
+### 025 — An Operator CLI (`knuckles`) Ships As A Pure Admin-API Client
+
+**Date:** 2026-11-07
+**Status:** Decided (Phase 1 of the agent-first setup roadmap)
+
+**Decision:** A new package, `packages/knuckles-cli/` (PyPI
+`knuckles-cli`, console script `knuckles`), is the default way to
+provision and check tenants. It talks to a running Knuckles over HTTP
+only: the public discovery endpoints plus the Decision #021 admin
+API. It never imports the `knuckles` service package and never
+touches the database, so it works against any deployment with
+`KNUCKLES_ADMIN_TOKEN` set, from a laptop or a coding agent.
+
+Commands: `login`/`logout` (profiles stored in
+`~/.config/knuckles/config.json`, mode 0600, with `KNUCKLES_URL` /
+`KNUCKLES_ADMIN_TOKEN` env overrides); `init` (create a tenant and
+write `KNUCKLES_URL` / `KNUCKLES_CLIENT_ID` / `KNUCKLES_CLIENT_SECRET`
+into the consuming app's `.env`); `apps list|show|create|rotate-secret|set-origins`;
+`providers google|apple|email|passkey|clear`, which accept the files
+the provider consoles actually hand you (Google's
+`client_secret_*.json`, Apple's `AuthKey_<KEYID>.p8`) and validate
+them locally before upload; and `doctor`, which checks the server
+(health, discovery `issuer`, JWKS, HTTPS) and each tenant (origins,
+atomic config groups per Decision #020, passkey rp_id/origin fit).
+Every command takes `--json` and emits the API's `{data}` / `{error}`
+envelope so agents can parse results; `doctor` exits non-zero on any
+failing check.
+
+Secrets never travel through argv (shell history, `ps`): the admin
+token, Resend API key, and Google client secret come from a file,
+stdin, an env var, or a hidden prompt.
+
+**Rationale:** Setup friction, not missing features, is what blocks
+tenant #2. The operator scripts need a checkout, a `DATABASE_URL`, and
+the Fernet key on the operator's machine; the admin API removed that
+need but left raw `curl`. A CLI over the admin API is the smallest
+step that makes setup scriptable by a coding agent, and it is the
+substrate the planned MCP server (Phase 2) wraps.
+
+**Alternatives considered:**
+- **Extend `scripts/*.py`** — rejected. They need database access and
+  the encryption key locally; that is break-glass, not onboarding.
+- **Build the CLI on the `knuckles-client` SDK's `admin` namespace** —
+  rejected for now. The SDK requires app-client credentials an
+  operator does not have, the admin namespace is unreleased, and
+  `doctor` needs unauthenticated discovery calls the SDK does not
+  expose. The CLI's HTTP layer is ~100 lines; revisit if it grows.
+- **A Node CLI** — rejected. The service, scripts, and primary SDK are
+  Python; one toolchain for the operator side.
+
+**Consequences:**
+- No new server routes and no new tables: the API surface list in
+  CLAUDE.md is unchanged.
+- CI gains a `cli` job mirroring the SDK job (black, ruff, mypy
+  strict, pytest).
+- `doctor` can only see what the admin API exposes: encrypted values
+  appear as `*_configured` booleans, and whether a NULL group inherits
+  the operator env fallback is server-side state, so empty groups are
+  reported as warnings, not failures. Resend domain verification is
+  checked once, when `providers email` has the key in hand.
