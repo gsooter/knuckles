@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     knuckles_jwt_private_key: str
     knuckles_jwt_key_id: str
     knuckles_access_token_ttl_seconds: int = 3600
-    knuckles_refresh_token_ttl_seconds: int = 30 * 24 * 3600
+    knuckles_refresh_token_ttl_seconds: int = 365 * 24 * 3600
 
     # Graceful signing-key rotation: comma-separated "kid:base64pem"
     # entries for keys that no longer sign but whose outstanding tokens

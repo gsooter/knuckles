@@ -261,7 +261,7 @@ Adding a route outside this list requires an entry in `DECISIONS.md`.
   `apple_oauth_private_key`*, `webauthn_rp_id`, `webauthn_rp_name`,
   `webauthn_origin` — `*` = Fernet-encrypted at rest), `created_at`.
 - `refresh_tokens` — `id`, `user_id`, `app_client_id`, `token_hash`,
-  `expires_at`, `used_at`, `created_at`.
+  `expires_at`, `used_at`, `replaced_by_id` (Decision 026), `created_at`.
 
 No other tables exist in Knuckles. Ever.
 

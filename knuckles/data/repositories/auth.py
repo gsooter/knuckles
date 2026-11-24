@@ -920,6 +920,37 @@ def mark_refresh_token_used(session: Session, token: RefreshToken) -> RefreshTok
     return token
 
 
+def get_refresh_token_by_id(
+    session: Session, token_id: uuid.UUID
+) -> RefreshToken | None:
+    """Look up a refresh-token row by primary key.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token_id: ``refresh_tokens.id``.
+
+    Returns:
+        The row, or ``None`` if it doesn't exist.
+    """
+    return session.get(RefreshToken, token_id)
+
+
+def link_refresh_token_successor(
+    session: Session, token: RefreshToken, successor_hash: str
+) -> None:
+    """Record which token was issued when ``token`` was rotated.
+
+    Args:
+        session: Active SQLAlchemy session.
+        token: The rotated (now used) row.
+        successor_hash: SHA-256 hex digest of the newly issued token.
+    """
+    successor = get_refresh_token_by_hash(session, successor_hash)
+    if successor is not None:
+        token.replaced_by_id = successor.id
+        session.flush()
+
+
 def consume_refresh_token(session: Session, token: RefreshToken) -> bool:
     """Atomically claim a refresh token for rotation.
 
