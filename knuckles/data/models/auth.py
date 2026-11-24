@@ -414,6 +414,10 @@ class RefreshToken(TimestampMixin, Base):
         expires_at: Hard expiry wall-clock UTC.
         used_at: Timestamp the token was rotated. ``None`` means
             the token is still active.
+        replaced_by_id: The token issued when this one was rotated.
+            Lets a client that never received that response retry
+            (its successor is still unused) instead of tripping reuse
+            detection.
         user: Relationship back to the owning user.
         app_client: Relationship back to the issuing app client.
     """
@@ -445,6 +449,11 @@ class RefreshToken(TimestampMixin, Base):
     )
     used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    replaced_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("refresh_tokens.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     user: Mapped[User] = relationship(back_populates="refresh_tokens")

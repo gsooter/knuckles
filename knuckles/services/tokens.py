@@ -150,6 +150,10 @@ def issue_session(
     )
 
 
+LOST_ROTATION_GRACE = timedelta(days=7)
+"""How long a client may retry a rotation whose response it never got."""
+
+
 def rotate_refresh_token(
     session: Session,
     *,
@@ -192,8 +196,11 @@ def rotate_refresh_token(
             status_code=401,
         )
 
+    retrying_lost_rotation = False
     if row.used_at is not None:
-        _revoke_all_for_reuse(session, row.user_id, app_client_id)
+        if not _forgive_lost_rotation(session, row, app_client_id):
+            _revoke_all_for_reuse(session, row.user_id, app_client_id)
+        retrying_lost_rotation = True
 
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
@@ -224,16 +231,61 @@ def rotate_refresh_token(
     # concurrent rotation of the same token, exactly one request wins.
     # The loser is indistinguishable from a replayed stolen token, so
     # it gets the full reuse response.
-    if not repo.consume_refresh_token(session, row):
+    if not retrying_lost_rotation and not repo.consume_refresh_token(session, row):
         _revoke_all_for_reuse(session, row.user_id, app_client_id)
 
-    return issue_session(
+    pair = issue_session(
         session,
         user_id=row.user_id,
         app_client_id=app_client_id,
         scopes=scopes,
         email=email if email is not None else user.email,
     )
+    repo.link_refresh_token_successor(session, row, _hash_token(pair.refresh_token))
+    return pair
+
+
+def _forgive_lost_rotation(
+    session: Session, row: RefreshToken, app_client_id: str
+) -> bool:
+    """Whether a re-presented token is a client retrying a lost response.
+
+    A mobile app suspended mid-refresh, or a dropped connection, leaves
+    the client holding a token the server already rotated. If the
+    successor issued for it was never used and the rotation was recent,
+    the client simply never received it: retire that successor and let
+    the client rotate again, instead of revoking every session the
+    person has (which signed people out across apps). A successor that
+    was used — or revoked by logout — means a genuine replay.
+
+    Args:
+        session: Active SQLAlchemy session.
+        row: The already-used token being presented.
+        app_client_id: Client asserting the token.
+
+    Returns:
+        True when the retry is forgiven and the unused successor retired.
+    """
+    if (
+        row.replaced_by_id is None
+        or row.app_client_id != app_client_id
+        or row.used_at is None
+    ):
+        return False
+    used_at = row.used_at if row.used_at.tzinfo else row.used_at.replace(tzinfo=UTC)
+    if datetime.now(tz=UTC) - used_at > LOST_ROTATION_GRACE:
+        return False
+    successor = repo.get_refresh_token_by_id(session, row.replaced_by_id)
+    # The conditional consume retires the successor atomically, so two
+    # concurrent retries can't both be forgiven.
+    if successor is None or not repo.consume_refresh_token(session, successor):
+        return False
+    _audit.info(
+        "refresh_rotation_retried user_id=%s app_client_id=%s",
+        row.user_id,
+        app_client_id,
+    )
+    return True
 
 
 def _revoke_all_for_reuse(

@@ -25,6 +25,18 @@ from knuckles.data.repositories import auth as repo
 from knuckles.services import tokens
 
 
+def _sha(token: str) -> str:
+    """SHA-256 hex digest, as Knuckles stores refresh tokens.
+
+    Args:
+        token: Refresh-token plaintext.
+
+    Returns:
+        The hex digest.
+    """
+    return hashlib.sha256(token.encode("ascii")).hexdigest()
+
+
 def _setup_user_and_client(session: Session) -> tuple[str, str]:
     """Create one user + one app client for the tests to consume.
 
@@ -100,14 +112,17 @@ def test_rotate_refresh_token_issues_new_pair(db_session: Session) -> None:
 
 
 def test_rotate_refresh_token_detects_reuse(db_session: Session) -> None:
-    """Presenting a used token revokes every active token for the user."""
+    """Replaying a token after its successor was used revokes every session."""
     user_id, client_id = _setup_user_and_client(db_session)
     first = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
     second = tokens.rotate_refresh_token(
         db_session, refresh_token=first.refresh_token, app_client_id=client_id
     )
+    third = tokens.rotate_refresh_token(
+        db_session, refresh_token=second.refresh_token, app_client_id=client_id
+    )
 
-    # Reuse the already-consumed first token.
+    # `first` comes back after the client already moved on: a replay.
     with pytest.raises(AppError) as exc:
         tokens.rotate_refresh_token(
             db_session,
@@ -116,12 +131,88 @@ def test_rotate_refresh_token_detects_reuse(db_session: Session) -> None:
         )
 
     assert exc.value.code == REFRESH_TOKEN_REUSED
-
-    # The still-active `second` token must also be revoked now.
-    second_hash = hashlib.sha256(second.refresh_token.encode("ascii")).hexdigest()
-    row = repo.get_refresh_token_by_hash(db_session, second_hash)
+    # The still-active `third` token must also be revoked now.
+    row = repo.get_refresh_token_by_hash(db_session, _sha(third.refresh_token))
     assert row is not None
     assert row.used_at is not None
+
+
+def test_lost_rotation_response_can_be_retried(db_session: Session) -> None:
+    """A client that never received its rotated token can retry, not be signed out.
+
+    Regression (2026-11): an app suspended mid-refresh kept the old
+    token; its next refresh looked like theft and revoked every session
+    the person had, across apps. If the successor was never used, the
+    client clearly never got it.
+    """
+    user_id, client_id = _setup_user_and_client(db_session)
+    first = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+    lost = tokens.rotate_refresh_token(
+        db_session, refresh_token=first.refresh_token, app_client_id=client_id
+    )
+
+    retried = tokens.rotate_refresh_token(
+        db_session, refresh_token=first.refresh_token, app_client_id=client_id
+    )
+
+    assert retried.refresh_token not in (first.refresh_token, lost.refresh_token)
+    lost_row = repo.get_refresh_token_by_hash(db_session, _sha(lost.refresh_token))
+    assert lost_row is not None and lost_row.used_at is not None
+    # The retried session works normally from here.
+    tokens.rotate_refresh_token(
+        db_session, refresh_token=retried.refresh_token, app_client_id=client_id
+    )
+
+
+def test_lost_response_retry_window_closes(db_session: Session) -> None:
+    """After the grace window, a replayed token is treated as reuse again."""
+    user_id, client_id = _setup_user_and_client(db_session)
+    first = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+    tokens.rotate_refresh_token(
+        db_session, refresh_token=first.refresh_token, app_client_id=client_id
+    )
+    row = repo.get_refresh_token_by_hash(db_session, _sha(first.refresh_token))
+    assert row is not None
+    row.used_at = datetime.now(tz=UTC) - timedelta(days=8)
+    db_session.flush()
+
+    with pytest.raises(AppError) as exc:
+        tokens.rotate_refresh_token(
+            db_session, refresh_token=first.refresh_token, app_client_id=client_id
+        )
+
+    assert exc.value.code == REFRESH_TOKEN_REUSED
+
+
+def test_logged_out_session_cannot_be_revived_by_its_old_token(
+    db_session: Session,
+) -> None:
+    """Logout revokes the successor, so the old token isn't a lost response."""
+    user_id, client_id = _setup_user_and_client(db_session)
+    first = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+    second = tokens.rotate_refresh_token(
+        db_session, refresh_token=first.refresh_token, app_client_id=client_id
+    )
+    tokens.revoke_refresh_token(
+        db_session, refresh_token=second.refresh_token, app_client_id=client_id
+    )
+
+    with pytest.raises(AppError) as exc:
+        tokens.rotate_refresh_token(
+            db_session, refresh_token=first.refresh_token, app_client_id=client_id
+        )
+
+    assert exc.value.code == REFRESH_TOKEN_REUSED
+
+
+def test_refresh_tokens_last_a_year(db_session: Session) -> None:
+    """Sessions survive a long break (sliding: renewed on every use)."""
+    user_id, client_id = _setup_user_and_client(db_session)
+    before = datetime.now(tz=UTC)
+
+    pair = tokens.issue_session(db_session, user_id=user_id, app_client_id=client_id)
+
+    assert pair.refresh_token_expires_at >= before + timedelta(days=365)
 
 
 def test_rotate_refresh_token_rejects_unknown_token(db_session: Session) -> None:

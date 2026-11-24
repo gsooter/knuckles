@@ -1257,3 +1257,42 @@ substrate the planned MCP server (Phase 2) wraps.
   the operator env fallback is server-side state, so empty groups are
   reported as warnings, not failures. Resend domain verification is
   checked once, when `providers email` has the key in hand.
+
+### 026 — Refresh Tokens Last A Year, And A Lost Rotation Can Be Retried
+
+**Date:** 2026-11-24
+**Status:** Decided (amends 004)
+
+**Decision:** Refresh tokens live 365 days (`KNUCKLES_REFRESH_TOKEN_TTL_SECONDS=31536000`),
+still renewed on every rotation, so a session only ends after a year of
+not opening the app. Each rotated token records its successor
+(`refresh_tokens.replaced_by_id`). When a used token is presented again
+within 7 days of its rotation and its successor has never been used,
+Knuckles treats it as a client retrying a response it never received:
+it retires the unused successor (atomically, via the conditional
+consume) and rotates again. A successor that was used, or revoked by
+logout, still means a replay, and the full reuse response from 004
+applies.
+
+**Rationale:** Consuming apps (Greenroom's iPhone app above all) were
+signing people out at random. An app suspended mid-refresh, or a
+dropped connection, leaves the client holding the old token; its next
+refresh tripped reuse detection and revoked every session the person
+had, across apps (logged twice on 2026-11-20: `greenroom-prod`, then
+`covers-prod`). People expect consumer apps to keep them signed in
+indefinitely, the way Spotify and Instagram do.
+
+**Trade-off:** someone holding a stolen *pre-rotation* token can use it
+while the legitimate client hasn't yet used its successor (at most 7
+days). Doing so retires the legitimate client's successor, which signs
+that client out — the same outcome as today's reuse response, and
+visible. Once the legitimate client rotates again, the stolen copy is
+dead and replaying it triggers the full revocation.
+
+**Alternatives considered:**
+- **A short time-based grace window** (e.g. 60 s) — rejected: a
+  suspended app may not retry for hours.
+- **Static (non-rotating) refresh tokens for mobile** — rejected per 004.
+- **Storing the successor's plaintext to replay the same response** —
+  rejected: plaintext tokens never touch the database.
+

@@ -48,7 +48,7 @@ _TEST_ENV = {
     "KNUCKLES_JWT_PRIVATE_KEY": _generate_test_private_key_b64(),
     "KNUCKLES_JWT_KEY_ID": "test-key-1",
     "KNUCKLES_ACCESS_TOKEN_TTL_SECONDS": "3600",
-    "KNUCKLES_REFRESH_TOKEN_TTL_SECONDS": "2592000",
+    "KNUCKLES_REFRESH_TOKEN_TTL_SECONDS": "31536000",
     "KNUCKLES_STATE_SECRET": "test-state-secret-with-enough-entropy-12345",
     "KNUCKLES_SECRETS_KEY": Fernet.generate_key().decode("ascii"),
     "MAGIC_LINK_TTL_SECONDS": "900",
